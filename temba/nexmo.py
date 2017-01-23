@@ -3,9 +3,9 @@ from __future__ import absolute_import, print_function, unicode_literals
 import requests
 
 from django.utils.translation import ugettext_lazy as _
-from temba.utils.gsm7 import is_gsm7
-from urlparse import urljoin
 from django.utils.http import urlencode
+from six.moves.urllib.parse import urljoin
+from temba.utils.gsm7 import is_gsm7
 
 
 class NexmoValidationError(Exception):

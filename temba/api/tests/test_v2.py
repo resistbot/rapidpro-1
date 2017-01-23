@@ -17,6 +17,7 @@ from django.utils import timezone
 from mock import patch
 from rest_framework import serializers
 from rest_framework.test import APIClient
+from six.moves.urllib.parse import quote_plus
 from temba.campaigns.models import Campaign, CampaignEvent
 from temba.channels.models import Channel, ChannelEvent
 from temba.contacts.models import Contact, ContactGroup, ContactField
@@ -25,7 +26,6 @@ from temba.locations.models import BoundaryAlias
 from temba.msgs.models import Broadcast, Label, Msg
 from temba.tests import TembaTest, AnonymousOrg
 from temba.values.models import Value
-from urllib import quote_plus
 from ..models import APIToken, Resthook, WebHookEvent
 from ..v2 import fields
 from ..v2.serializers import format_datetime

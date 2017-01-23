@@ -5,7 +5,7 @@ import time
 from django.conf import settings
 from django.core.urlresolvers import resolve
 from django.http import HttpResponseRedirect
-from orgs.context_processors import user_group_perms_processor
+from temba.orgs.context_processors import user_group_perms_processor
 
 
 class FormaxMixin(object):

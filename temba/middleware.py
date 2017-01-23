@@ -4,10 +4,10 @@ import pstats
 import traceback
 import copy
 
-from cStringIO import StringIO
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone, translation
+from io import StringIO
 from temba.orgs.models import Org
 from temba.contacts.models import Contact
 

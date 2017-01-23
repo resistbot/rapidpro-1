@@ -2,7 +2,6 @@ from __future__ import absolute_import, print_function, unicode_literals
 
 import json
 import time
-import urlparse
 import phonenumbers
 import plivo
 import regex
@@ -29,19 +28,18 @@ from django.core.cache import cache
 from django_redis import get_redis_connection
 from gcm.gcm import GCM, GCMNotRegisteredException
 from phonenumbers import NumberParseException
+from six.moves.urllib.parse import parse_qs, quote_plus
 from smartmin.models import SmartModel
 from temba.nexmo import NexmoClient
 from temba.orgs.models import Org, OrgLock, APPLICATION_SID, NEXMO_UUID
 from temba.utils.email import send_template_email
 from temba.utils import analytics, random_string, dict_to_struct, dict_to_json, on_transaction_commit
 from time import sleep
-
 from twilio import TwilioRestException
 from twilio.rest import TwilioRestClient
 from twython import Twython
 from temba.utils.gsm7 import is_gsm7, replace_non_gsm7_accents
 from temba.utils.models import TembaModel, generate_uuid
-from urllib import quote_plus
 from xml.sax.saxutils import quoteattr, escape
 
 TEMBA_HEADERS = {'User-agent': 'RapidPro'}
@@ -1989,7 +1987,7 @@ class Channel(TembaModel):
             failed = False
             try:
                 response = requests.get(url, headers=TEMBA_HEADERS, timeout=5)
-                response_qs = urlparse.parse_qs(response.text)
+                response_qs = parse_qs(response.text)
             except Exception:
                 failed = True
 

@@ -20,8 +20,8 @@ from django.db import connection
 from django.test import LiveServerTestCase
 from django.test.runner import DiscoverRunner
 from django.utils import timezone
-from HTMLParser import HTMLParser
 from selenium.webdriver.firefox.webdriver import WebDriver
+from six.moves.html_parser import HTMLParser
 from smartmin.tests import SmartminTest
 from temba.contacts.models import Contact, ContactGroup, URN
 from temba.orgs.models import Org

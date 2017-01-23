@@ -4,12 +4,12 @@ import json
 import os
 import re
 
-from urlparse import urlparse
 from django.conf import settings
 from django.contrib.auth.models import Group
 from django.core.files import File
 from django.core.urlresolvers import reverse
 from mock import patch
+from six.moves.urllib.parse import urlparse
 from temba.channels.models import Channel
 from temba.contacts.models import Contact
 from temba.flows.models import Flow, FlowRun, ActionLog, FlowStep

@@ -7,10 +7,10 @@ from django.http import HttpResponse, JsonResponse
 from django.utils import timezone
 from django.utils.translation import ugettext_lazy as _
 from django.views.generic import View
+from six.moves.urllib.parse import parse_qs
 from smartmin.views import SmartTemplateView, SmartReadView, SmartListView, SmartView
 from temba.channels.models import ChannelEvent
 from temba.orgs.views import OrgPermsMixin
-from urlparse import parse_qs
 from .models import WebHookEvent, WebHookResult, APIToken, Resthook
 
 

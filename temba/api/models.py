@@ -16,13 +16,13 @@ from django.utils import timezone
 from django.utils.translation import ugettext_lazy as _
 from hashlib import sha1
 from rest_framework.permissions import BasePermission
+from six.moves.urllib.parse import urlencode
 from smartmin.models import SmartModel
 from temba.channels.models import Channel, ChannelEvent, TEMBA_HEADERS
 from temba.contacts.models import TEL_SCHEME
 from temba.orgs.models import Org
 from temba.utils import datetime_to_str, prepped_request_to_str
 from temba.utils.cache import get_cacheable_attr
-from urllib import urlencode
 
 PENDING = 'P'
 COMPLETE = 'C'

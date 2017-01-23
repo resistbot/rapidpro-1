@@ -1,7 +1,8 @@
 amqp==1.4.9
 amqplib==1.0.2
-analytics-python==0.4.4
-antlr4-python2-runtime==4.5.2
+analytics-python==1.2.6
+antlr4-python2-runtime; python_version < '3.0'
+antlr4-python3-runtime; python_version >= '3.0'
 anyjson==0.3.3
 backports.ssl-match-hostname==3.4.0.2
 beautifulsoup4==4.4.1
@@ -81,7 +82,7 @@ pyflakes==1.0.0
 Pygments==1.6
 pyparsing==2.0.1
 python-dateutil==2.2
-python-gcm==0.1.5
+python-gcm==0.4
 python-telegram-bot==3.3b1
 pytz==2016.4
 PyYAML==3.11

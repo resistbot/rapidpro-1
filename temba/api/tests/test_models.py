@@ -10,12 +10,12 @@ from django.contrib.auth.models import Group
 from django.core.urlresolvers import reverse
 from django.utils import timezone
 from mock import patch
+from six.moves.urllib.parse import parse_qs
 from temba.channels.models import ChannelEvent, SyncEvent
 from temba.contacts.models import Contact, TEL_SCHEME
 from temba.msgs.models import Broadcast
 from temba.orgs.models import ALL_EVENTS
 from temba.tests import MockResponse, TembaTest
-from urlparse import parse_qs
 from ..models import APIToken, WebHookEvent, WebHookResult, SMS_RECEIVED
 
 
