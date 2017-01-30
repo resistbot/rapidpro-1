@@ -31,7 +31,7 @@ from temba.triggers.models import Trigger
 from temba.ussd.models import USSDSession
 from temba.utils import json_date_to_datetime, ms_to_datetime, on_transaction_commit
 from temba.utils.middleware import disable_middleware
-from temba.utils.queues import push_task
+from temba.utils.queues import push_task_on_commit
 from .tasks import fb_channel_subscribe
 from twilio import twiml
 
@@ -1549,8 +1549,8 @@ class MageHandler(BaseChannelHandler):
 
             msg = Msg.objects.select_related('org').get(pk=msg_id)
 
-            push_task(msg.org, HANDLER_QUEUE, HANDLE_EVENT_TASK,
-                      dict(type=MSG_EVENT, id=msg.id, from_mage=True, new_contact=new_contact))
+            push_task_on_commit(msg.org, HANDLER_QUEUE, HANDLE_EVENT_TASK,
+                                dict(type=MSG_EVENT, id=msg.id, from_mage=True, new_contact=new_contact))
 
             # fire an event off for this message
             WebHookEvent.trigger_sms_event(SMS_RECEIVED, msg, msg.created_on)

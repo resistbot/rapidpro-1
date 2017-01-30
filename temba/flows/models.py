@@ -41,7 +41,7 @@ from temba.utils import chunk_list, clean_string, on_transaction_commit
 from temba.utils.email import send_template_email, is_valid_address
 from temba.utils.models import TembaModel, ChunkIterator, generate_uuid
 from temba.utils.profiler import SegmentProfiler
-from temba.utils.queues import push_task
+from temba.utils.queues import push_task_on_commit
 from temba.values.models import Value
 from temba_expressions.utils import tokenize
 from twilio import twiml
@@ -1669,13 +1669,13 @@ class Flow(TembaModel):
 
                 if len(batch_contacts) >= START_FLOW_BATCH_SIZE:
                     print("Starting flow '%s' for batch of %d contacts" % (self.name, len(task_context['contacts'])))
-                    push_task(self.org, 'flows', Flow.START_MSG_FLOW_BATCH, task_context)
+                    push_task_on_commit(self.org, 'flows', Flow.START_MSG_FLOW_BATCH, task_context)
                     batch_contacts = []
                     task_context['contacts'] = batch_contacts
 
             if batch_contacts:
                 print("Starting flow '%s' for batch of %d contacts" % (self.name, len(task_context['contacts'])))
-                push_task(self.org, 'flows', Flow.START_MSG_FLOW_BATCH, task_context)
+                push_task_on_commit(self.org, 'flows', Flow.START_MSG_FLOW_BATCH, task_context)
 
             return []
 

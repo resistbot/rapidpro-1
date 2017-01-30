@@ -13,6 +13,8 @@ from django.conf import settings
 from django.core import mail
 from django.core.urlresolvers import reverse
 from django.core.paginator import Paginator
+from django.db import transaction
+from django.test import TransactionTestCase
 from django.test import override_settings
 from django.utils import timezone
 from django_redis import get_redis_connection
@@ -30,7 +32,7 @@ from .gsm7 import is_gsm7, replace_non_gsm7_accents
 
 from .email import send_simple_email
 from .timezones import TimeZoneFormField, timezone_to_country_code
-from .queues import start_task, complete_task, push_task, HIGH_PRIORITY, LOW_PRIORITY, nonoverlapping_task
+from .queues import start_task, complete_task, push_task, push_task_on_commit, HIGH_PRIORITY, LOW_PRIORITY, nonoverlapping_task
 from .currencies import currency_for_country
 from . import format_decimal, slugify_with, str_to_datetime, str_to_time, truncate, random_string, non_atomic_when_eager, \
     clean_string
@@ -474,6 +476,24 @@ class JsonTest(TembaTest):
         # test the same using our object mocking
         mock = dict_to_struct('Mock', json.loads(encoded), ['now'])
         self.assertEquals(mock.now, source['now'])
+
+
+# needs to be in a TransactionTestCase or the transaction is never committed
+class CommitQueueTest(TransactionTestCase):
+
+    def test_commit_queueing(self):
+        r = get_redis_connection()
+        args1 = dict(task=1)
+
+        with transaction.atomic():
+            push_task_on_commit(1, None, 'test', args1)
+
+            # shouldn't be any tasks yet
+            self.assertEqual(r.zcard('test:active'), 0)
+
+        # but once committed our task exists
+        self.assertEqual(r.zcard('test:active'), 1)
+        self.assertIsEqual(r.zscore('test:active', self.org.id), 1)
 
 
 class QueueTest(TembaTest):

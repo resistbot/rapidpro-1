@@ -8,7 +8,7 @@ from django.utils import timezone
 from django_redis import get_redis_connection
 from temba.campaigns.models import Campaign, CampaignEvent, EventFire
 from temba.msgs.models import HANDLER_QUEUE, HANDLE_EVENT_TASK, FIRE_EVENT
-from temba.utils.queues import push_task, nonoverlapping_task
+from temba.utils.queues import push_task_on_commit, nonoverlapping_task
 
 
 logger = logging.getLogger(__name__)
@@ -23,7 +23,7 @@ def check_campaigns_task():
     for fire in EventFire.objects.filter(fired=None,
                                          scheduled__lte=timezone.now()).select_related('contact', 'contact__org'):
         try:
-            push_task(fire.contact.org, HANDLER_QUEUE, HANDLE_EVENT_TASK, dict(type=FIRE_EVENT, id=fire.id))
+            push_task_on_commit(fire.contact.org, HANDLER_QUEUE, HANDLE_EVENT_TASK, dict(type=FIRE_EVENT, id=fire.id))
 
         except Exception:  # pragma: no cover
             logger.error("Error running campaign event: %s" % fire.pk, exc_info=True)

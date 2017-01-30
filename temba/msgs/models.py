@@ -31,7 +31,7 @@ from temba.utils.cache import get_cacheable_attr
 from temba.utils.email import send_template_email
 from temba.utils.expressions import evaluate_template
 from temba.utils.models import TembaModel
-from temba.utils.queues import DEFAULT_PRIORITY, push_task, LOW_PRIORITY, HIGH_PRIORITY
+from temba.utils.queues import DEFAULT_PRIORITY, push_task_on_commit, LOW_PRIORITY, HIGH_PRIORITY
 from uuid import uuid4
 from .handler import MessageHandler
 
@@ -721,7 +721,7 @@ class Msg(models.Model):
                             if task_priority is None:  # pragma: needs cover
                                 task_priority = DEFAULT_PRIORITY
 
-                            push_task(task_msgs[0]['org'], MSG_QUEUE, SEND_MSG_TASK, task_msgs, priority=task_priority)
+                            push_task_on_commit(task_msgs[0]['org'], MSG_QUEUE, SEND_MSG_TASK, task_msgs, priority=task_priority)
                             task_msgs = []
                             task_priority = None
 
@@ -742,7 +742,7 @@ class Msg(models.Model):
         if task_msgs:
             if task_priority is None:
                 task_priority = DEFAULT_PRIORITY
-            push_task(task_msgs[0]['org'], MSG_QUEUE, SEND_MSG_TASK, task_msgs, priority=task_priority)
+            push_task_on_commit(task_msgs[0]['org'], MSG_QUEUE, SEND_MSG_TASK, task_msgs, priority=task_priority)
 
     @classmethod
     def process_message(cls, msg):
@@ -1081,8 +1081,8 @@ class Msg(models.Model):
 
         # others do in celery
         else:
-            push_task(self.org, HANDLER_QUEUE, HANDLE_EVENT_TASK,
-                      dict(type=MSG_EVENT, id=self.id, from_mage=False, new_contact=False))
+            push_task_on_commit(self.org, HANDLER_QUEUE, HANDLE_EVENT_TASK,
+                                dict(type=MSG_EVENT, id=self.id, from_mage=False, new_contact=False))
 
     def build_message_context(self):
         date_format = get_datetime_format(self.org.get_dayfirst())[1]

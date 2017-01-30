@@ -12,7 +12,7 @@ from django_redis import get_redis_connection
 from enum import Enum
 from temba.msgs.models import SEND_MSG_TASK, MSG_QUEUE
 from temba.utils import dict_to_struct
-from temba.utils.queues import start_task, push_task, nonoverlapping_task, complete_task
+from temba.utils.queues import start_task, push_task_on_commit, nonoverlapping_task, complete_task
 from temba.utils.mage import MageClient
 from .models import Channel, Alert, ChannelLog, ChannelCount
 
@@ -70,7 +70,7 @@ def send_msg_task():
         # if some msgs weren't sent for some reason, then requeue them for later sending
         if msg_tasks:
             # requeue any unsent msgs
-            push_task(org_id, MSG_QUEUE, SEND_MSG_TASK, msg_tasks)
+            push_task_on_commit(org_id, MSG_QUEUE, SEND_MSG_TASK, msg_tasks)
 
 
 @nonoverlapping_task(track_started=True, name='check_channels_task', lock_key='check_channels')

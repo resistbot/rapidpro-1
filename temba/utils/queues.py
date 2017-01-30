@@ -5,6 +5,7 @@ import time
 import importlib
 
 from celery import current_app, shared_task
+from django.db import transaction
 from django.conf import settings
 from django_redis import get_redis_connection
 from temba.utils import dict_to_json
@@ -17,6 +18,14 @@ HIGHER_PRIORITY = -20000000  # -20M ~ 220 days
 
 # for tasks using a redis lock to prevent overlapping this is the default timeout for the lock
 DEFAULT_TASK_LOCK_TIMEOUT = 900
+
+
+def push_task_on_commit(org, queue, task_name, args, priority=DEFAULT_PRIORITY):
+    """
+    Queues up the passed in task to begin when our transaction is committed (or
+    immediately if we are not presently in a transaction)
+    """
+    transaction.on_commit(lambda: push_task(org, queue, task_name, args, priority))
 
 
 def push_task(org, queue, task_name, args, priority=DEFAULT_PRIORITY):

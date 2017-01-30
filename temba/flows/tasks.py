@@ -9,7 +9,7 @@ from temba.flows.models import FlowStatsCache
 from temba.msgs.models import Broadcast, Msg, TIMEOUT_EVENT, HANDLER_QUEUE, HANDLE_EVENT_TASK
 from temba.orgs.models import Org
 from temba.utils.queues import start_task, complete_task
-from temba.utils.queues import push_task, nonoverlapping_task
+from temba.utils.queues import push_task_on_commit, nonoverlapping_task
 from .models import ExportFlowResultsTask, Flow, FlowStart, FlowRun, FlowStep, FlowRunCount, FlowPathCount, FlowPathRecentStep
 
 
@@ -51,7 +51,7 @@ def check_flow_timeouts_task():
     runs = runs.only('id', 'org', 'timeout_on')
     for run in runs:
         # move this flow forward via the handler queue
-        push_task(run.org_id, HANDLER_QUEUE, HANDLE_EVENT_TASK, dict(type=TIMEOUT_EVENT, run=run.id, timeout_on=run.timeout_on))
+        push_task_on_commit(run.org_id, HANDLER_QUEUE, HANDLE_EVENT_TASK, dict(type=TIMEOUT_EVENT, run=run.id, timeout_on=run.timeout_on))
 
 
 @task(track_started=True, name='continue_parent_flows')  # pragma: no cover
