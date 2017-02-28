@@ -1,4 +1,5 @@
 import pycountry
+import six
 
 """
 These are exceptions according to ISO 4217 because they are super-national
@@ -128,9 +129,26 @@ CURRENCY_EXCEPTIONS = {
 
 
 def currency_for_country(alpha2):
-    country = pycountry.countries.get(alpha2=str(alpha2))
+    country = pycountry.countries.get(alpha_2=six.text_type(alpha2))
     try:
         return pycountry.currencies.get(numeric=country.numeric)
     except:
-        currency_code = CURRENCY_EXCEPTIONS.get(str(alpha2))
-        return pycountry.currencies.get(letter=currency_code)
+        currency_code = CURRENCY_EXCEPTIONS.get(six.text_type(alpha2))
+        return pycountry.currencies.get(alpha_3=currency_code)
+
+
+def get_currency_name(code):
+    try:
+        currency = pycountry.currencies.get(alpha_3=code)
+        return currency.name
+    except:
+        return code
+
+
+def search_currency_names(query):
+    matches = []
+    for currency in pycountry.currencies:
+        query = query.lower()
+        if query in currency.name.lower():
+            matches.append(dict(id=currency.alpha_3, text=currency.name.strip()))
+    return matches

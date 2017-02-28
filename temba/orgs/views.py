@@ -36,7 +36,7 @@ from datetime import timedelta
 from temba.api.models import APIToken
 from temba.channels.models import Channel
 from temba.formax import FormaxMixin
-from temba.utils import analytics, languages
+from temba.utils import analytics, languages, currencies
 from temba.utils.middleware import disable_middleware
 from temba.utils.timezones import TimeZoneFormField
 from temba.utils.email import is_valid_address
@@ -2024,6 +2024,7 @@ class OrgCRUDL(SmartCRUDL):
         class TransferToAccountForm(forms.ModelForm):
             account_login = forms.CharField(label=_("Login"), required=False)
             airtime_api_token = forms.CharField(label=_("API Token"), required=False)
+            currencies = forms.CharField(label=_("Currencies"), required=False)
             disconnect = forms.CharField(widget=forms.HiddenInput, max_length=6, required=True)
 
             def clean(self):
@@ -2053,7 +2054,7 @@ class OrgCRUDL(SmartCRUDL):
 
             class Meta:
                 model = Org
-                fields = ('account_login', 'airtime_api_token', 'disconnect')
+                fields = ('account_login', 'airtime_api_token', 'currencies', 'disconnect')
 
         form_class = TransferToAccountForm
         submit_button_name = "Save"
@@ -2068,8 +2069,31 @@ class OrgCRUDL(SmartCRUDL):
 
             return context
 
+        def get(self, request, *args, **kwargs):
+
+            if 'search' in self.request.GET or 'initial' in self.request.GET:
+                initial = self.request.GET.get('initial', '').split(',')
+                matches = []
+
+                if len(initial) > 0:
+                    for iso_code in initial:
+                        if iso_code:
+                            currency_name = currencies.get_currency_name(iso_code)
+                            matches.append(dict(id=iso_code, text=currency_name))
+
+                if len(matches) == 0:
+                    search = self.request.GET.get('search', '').strip().lower()
+                    matches += currencies.search_currency_names(search)
+                return JsonResponse(dict(results=matches))
+
+            return super(OrgCRUDL.TransferToAccount, self).get(request, *args, **kwargs)
+
         def derive_initial(self):
             initial = super(OrgCRUDL.TransferToAccount, self).derive_initial()
+
+            currencies = ','.join([currency.iso_code for currency in self.get_object().currencies.order_by('name')])
+            initial['currencies'] = currencies
+
             config = self.object.config_json()
             initial['account_login'] = config.get(TRANSFERTO_ACCOUNT_LOGIN, None)
             initial['airtime_api_token'] = config.get(TRANSFERTO_AIRTIME_API_TOKEN, None)
@@ -2080,6 +2104,13 @@ class OrgCRUDL(SmartCRUDL):
             user = self.request.user
             org = user.get_org()
             disconnect = form.cleaned_data.get('disconnect', 'false') == 'true'
+            currency_iso_codes = form.cleaned_data['currencies'].split(',')
+
+            # remove empty codes
+            currency_iso_codes = [code for code in currency_iso_codes if code]
+
+            self.object.set_currencies(user, currency_iso_codes)
+
             if disconnect:
                 org.remove_transferto_account(user)
                 return HttpResponseRedirect(reverse('orgs.org_home'))

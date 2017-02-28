@@ -80,7 +80,7 @@ ply==3.4
 prettytable==0.7.2
 psycopg2==2.5.2
 pyasn1==0.1.9
-pycountry==1.20
+pycountry==17.1.8
 pycparser==2.14
 pycrypto==2.6.1
 pyflakes==1.0.0

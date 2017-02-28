@@ -38,7 +38,7 @@ from temba.locations.models import AdminBoundary, BoundaryAlias
 from temba.utils import analytics, str_to_datetime, get_datetime_format, datetime_to_str, random_string
 from temba.utils import languages
 from temba.utils.cache import get_cacheable_result, get_cacheable_attr, incrby_existing
-from temba.utils.currencies import currency_for_country
+from temba.utils.currencies import currency_for_country, get_currency_name
 from temba.utils.email import send_template_email
 from temba.utils.models import SquashableModel
 from temba.utils.timezones import timezone_to_country_code
@@ -631,12 +631,25 @@ class Org(SmartModel):
         channel_country_codes = self.channels.filter(is_active=True).exclude(country=None)
         channel_country_codes = set(channel_country_codes.values_list('country', flat=True))
 
+        org_currencies = self.currencies.order_by('name')
+
+        added_country_currency_combination = set()
+
         for country_code in channel_country_codes:
-            country_obj = pycountry.countries.get(alpha2=country_code)
+            country_obj = pycountry.countries.get(alpha_2=country_code)
             country_name = country_obj.name
             currency = currency_for_country(country_code)
-            channel_countries.append(dict(code=country_code, name=country_name, currency_code=currency.letter,
+            channel_countries.append(dict(code=country_code, name=country_name, currency_code=currency.alpha_3,
                                           currency_name=currency.name))
+
+            added_country_currency_combination.add("%s:%s" % (country_code, currency.alpha_3))
+            for org_currency in org_currencies:
+                code_key = "%s:%s" % (country_code, org_currency.iso_code)
+                if code_key not in added_country_currency_combination:
+                    channel_countries.append(dict(code=code_key, name=country_name, currency_code=org_currency.iso_code,
+                                                  currency_name=org_currency.name))
+
+                    added_country_currency_combination.add(code_key)
 
         return sorted(channel_countries, key=lambda k: k['name'])
 
@@ -946,7 +959,7 @@ class Org(SmartModel):
             try:
                 country = pycountry.countries.get(name=self.country.name)
                 if country:
-                    return country.alpha2
+                    return country.alpha_2
             except KeyError:  # pragma: no cover
                 # pycountry blows up if we pass it a country name it doesn't know
                 pass
@@ -958,6 +971,24 @@ class Org(SmartModel):
             return countries[0]
 
         return None
+
+    def get_currency_codes(self):
+        return get_cacheable_attr(self, '_currency_codes', lambda: {c.iso_code for c in self.currencies.all()})
+
+    def set_currencies(self, user, iso_codes):
+
+        for iso_code in iso_codes:
+            name = get_currency_name(iso_code)
+            currency = self.currencies.filter(iso_code=iso_code).first()
+
+            if name and not currency:
+                currency = self.currencies.create(iso_code=iso_code, name=name, created_by=user, modified_by=user)
+
+        # remove any languages that are not in the new list
+        self.currencies.exclude(iso_code__in=iso_codes).delete()
+
+        if hasattr(self, '_currency_codes'):  # invalidate language cache if set
+            delattr(self, '_currency_codes')
 
     def get_language_codes(self):
         return get_cacheable_attr(self, '_language_codes', lambda: {l.iso_code for l in self.languages.all()})
@@ -1900,6 +1931,25 @@ def get_stripe_credentials():
     public_key = os.environ.get('STRIPE_PUBLIC_KEY', getattr(settings, 'STRIPE_PUBLIC_KEY', 'MISSING_STRIPE_PUBLIC_KEY'))
     private_key = os.environ.get('STRIPE_PRIVATE_KEY', getattr(settings, 'STRIPE_PRIVATE_KEY', 'MISSING_STRIPE_PRIVATE_KEY'))
     return (public_key, private_key)
+
+
+@six.python_2_unicode_compatible
+class Currency(SmartModel):
+    name = models.CharField(max_length=128)
+
+    iso_code = models.CharField(max_length=4)
+
+    org = models.ForeignKey(Org, verbose_name=_("Org"), related_name="currencies")
+
+    @classmethod
+    def create(cls, org, user, name, iso_code):
+        return cls.objects.create(org=org, name=name, iso_code=iso_code, created_by=user, modified_by=user)
+
+    def as_json(self):
+        return dict(name=self.name, iso_code=self.iso_code)
+
+    def __str__(self):
+        return '%s' % self.name
 
 
 @six.python_2_unicode_compatible
