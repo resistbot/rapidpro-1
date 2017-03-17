@@ -24,7 +24,7 @@ from temba.contacts.models import Contact, ContactField, ContactGroup, TEL_SCHEM
 from temba.flows.models import Flow, FlowRun, FlowStep, RuleSet
 from temba.locations.models import AdminBoundary, BoundaryAlias
 from temba.msgs.models import Broadcast, Msg, Label
-from temba.utils import json_date_to_datetime, splitting_getlist, str_to_bool, non_atomic_gets
+from temba.utils import json_date_to_datetime, splitting_getlist, str_to_bool
 from ..models import APIPermission, SSLPermission
 from .serializers import BoundarySerializer, AliasSerializer, BroadcastCreateSerializer, BroadcastReadSerializer
 from .serializers import ChannelEventSerializer, CampaignReadSerializer, CampaignWriteSerializer
@@ -248,10 +248,6 @@ class BaseAPIView(generics.GenericAPIView):
     Base class of all our API endpoints
     """
     permission_classes = (SSLPermission, APIPermission)
-
-    @non_atomic_gets
-    def dispatch(self, request, *args, **kwargs):
-        return super(BaseAPIView, self).dispatch(request, *args, **kwargs)
 
 
 class ListAPIMixin(mixins.ListModelMixin):

@@ -34,7 +34,6 @@ from requests import Session
 from smartmin.models import SmartModel
 from temba.bundles import get_brand_bundles, get_bundle_map
 from temba.locations.models import AdminBoundary, BoundaryAlias
-
 from temba.utils import analytics, str_to_datetime, get_datetime_format, datetime_to_str, random_string
 from temba.utils import languages
 from temba.utils.cache import get_cacheable_result, get_cacheable_attr, incrby_existing
@@ -1762,7 +1761,7 @@ class Org(SmartModel):
         """
         Initializes an organization, creating all the dependent objects we need for it to work properly.
         """
-        from temba.middleware import BrandingMiddleware
+        from temba.utils.middleware import BrandingMiddleware
 
         if not branding:
             branding = BrandingMiddleware.get_branding_for_host('')

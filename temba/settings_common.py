@@ -162,18 +162,18 @@ TEMPLATES = [
 if TESTING:
     TEMPLATES[0]['OPTIONS']['context_processors'] += ('temba.tests.add_testing_flag_to_context', )
 
-MIDDLEWARE_CLASSES = (
+MIDDLEWARE = (
+    'temba.utils.middleware.ExceptionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'temba.utils.middleware.DisableMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
-    'temba.middleware.BrandingMiddleware',
-    'temba.middleware.OrgTimezoneMiddleware',
-    'temba.middleware.FlowSimulationMiddleware',
-    'temba.middleware.ActivateLanguageMiddleware',
-    'temba.middleware.NonAtomicGetsMiddleware',
+    'temba.utils.middleware.BrandingMiddleware',
+    'temba.utils.middleware.OrgTimezoneMiddleware',
+    'temba.utils.middleware.FlowSimulationMiddleware',
+    'temba.utils.middleware.ActivateLanguageMiddleware',
     'temba.utils.middleware.OrgHeaderMiddleware',
 )
 

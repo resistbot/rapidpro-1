@@ -1414,7 +1414,7 @@ class NCCOTest(TembaTest):
 
 class MiddlewareTest(TembaTest):
 
-    def test_orgheader(self):
+    def test_org_header(self):
         response = self.client.get(reverse('public.public_index'))
         self.assertFalse(response.has_header('X-Temba-Org'))
 
@@ -1427,6 +1427,10 @@ class MiddlewareTest(TembaTest):
 
         response = self.client.get(reverse('public.public_index'))
         self.assertEqual(response['X-Temba-Org'], six.text_type(self.org.id))
+
+    def test_branding(self):
+        response = self.client.get(reverse('public.public_index'))
+        self.assertEqual(response.context['request'].branding, settings.BRANDING['rapidpro.io'])
 
 
 class ProfilerTest(TembaTest):
