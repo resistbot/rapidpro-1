@@ -37,7 +37,6 @@ from temba.api.models import APIToken
 from temba.channels.models import Channel
 from temba.formax import FormaxMixin
 from temba.utils import analytics, languages
-from temba.utils.middleware import disable_middleware
 from temba.utils.timezones import TimeZoneFormField
 from temba.utils.email import is_valid_address
 from twilio.rest import TwilioRestClient
@@ -2532,10 +2531,6 @@ class StripeHandler(View):  # pragma: no cover
     Handles WebHook events from Stripe.  We are interested as to when invoices are
     charged by Stripe so we can send the user an invoice email.
     """
-    @disable_middleware
-    def dispatch(self, *args, **kwargs):
-        return super(StripeHandler, self).dispatch(*args, **kwargs)
-
     def get(self, request, *args, **kwargs):
         return HttpResponse("ILLEGAL METHOD")
 

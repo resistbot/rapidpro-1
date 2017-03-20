@@ -9,8 +9,6 @@ import traceback
 from django.conf import settings
 from django.core.exceptions import MiddlewareNotUsed
 from django.utils import timezone, translation
-from django.utils.decorators import available_attrs
-from functools import wraps
 from io import StringIO
 from temba.orgs.models import Org
 from temba.contacts.models import Contact
@@ -24,31 +22,6 @@ class BaseMiddleware(object):
 
     def __call__(self, request):
         return self.get_response(request)
-
-
-def disable_middleware(view_func):
-    """
-    This middleware allows us to short circuit middleware processing for views that are decorated with
-    @disable_middleware. We use this for some of our API views, specifically ones coming in from aggregators
-    where most of the middlewares are not useful to us.
-    """
-    def wrapped_view(*args, **kwargs):
-        return view_func(*args, **kwargs)
-    wrapped_view.disable_middleware = True
-    return wraps(view_func, assigned=available_attrs(view_func))(wrapped_view)
-
-
-class DisableMiddleware(BaseMiddleware):
-    """
-    Middleware; looks for a view attribute 'disable_middleware'
-    and short-circuits. Relies on the fact that if you return an HttpResponse
-    from a view, it will short-circuit other middleware, see:
-    https://docs.djangoproject.com/en/dev/topics/http/middleware/#process-request
-    """
-    def process_view(self, request, view_func, view_args, view_kwargs):
-        if getattr(view_func, 'disable_middleware', False):
-            return view_func(request, *view_args, **view_kwargs)
-        return None
 
 
 class ExceptionMiddleware(BaseMiddleware):

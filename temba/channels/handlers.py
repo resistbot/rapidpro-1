@@ -30,7 +30,6 @@ from temba.msgs.models import Msg, HANDLE_EVENT_TASK, HANDLER_QUEUE, MSG_EVENT, 
 from temba.triggers.models import Trigger
 from temba.ussd.models import USSDSession
 from temba.utils import json_date_to_datetime, ms_to_datetime, on_transaction_commit
-from temba.utils.middleware import disable_middleware
 from temba.utils.queues import push_task
 from temba.utils.http import HttpEvent
 from twilio import twiml
@@ -43,10 +42,6 @@ class BaseChannelHandler(View):
     """
     url = None
     url_name = None
-
-    @disable_middleware
-    def dispatch(self, request, *args, **kwargs):
-        return super(BaseChannelHandler, self).dispatch(request, *args, **kwargs)
 
     @classmethod
     def get_url(cls):
