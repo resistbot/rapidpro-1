@@ -15,7 +15,7 @@ from django.contrib.auth.models import User, Group
 from django.core import mail
 from django.core.exceptions import ValidationError
 from django.core.urlresolvers import reverse
-from django.http import HttpRequest
+from django.http import HttpRequest, HttpResponse
 from django.test.utils import override_settings
 from django.utils import timezone
 from mock import patch, Mock
@@ -27,13 +27,13 @@ from temba.channels.models import Channel
 from temba.contacts.models import Contact, ContactGroup, TEL_SCHEME, TWITTER_SCHEME
 from temba.flows.models import Flow, ActionSet
 from temba.locations.models import AdminBoundary
-from temba.middleware import BrandingMiddleware
 from temba.msgs.models import Label, Msg, INCOMING
 from temba.orgs.models import UserSettings, NEXMO_SECRET, NEXMO_KEY
 from temba.tests import TembaTest, MockResponse, MockTwilioClient, MockRequestValidator, FlowFileTest
 from temba.triggers.models import Trigger
-from temba.utils.email import link_components
 from temba.utils import languages, dict_to_struct
+from temba.utils.email import link_components
+from temba.utils.middleware import BrandingMiddleware
 from .models import Org, OrgEvent, TopUp, Invitation, Language, DAYFIRST, MONTHFIRST, CURRENT_EXPORT_VERSION
 from .models import CreditAlert, ORG_CREDIT_OVER, ORG_CREDIT_LOW, ORG_CREDIT_EXPIRING
 from .models import UNREAD_FLOW_MSGS, UNREAD_INBOX_MSGS, TopUpCredits
@@ -2944,13 +2944,13 @@ class EmailContextProcessorsTest(SmartminTest):
     def setUp(self):
         super(EmailContextProcessorsTest, self).setUp()
         self.admin = self.create_user("Administrator")
-        self.middleware = BrandingMiddleware()
+        self.middleware = BrandingMiddleware(get_response=lambda r: HttpResponse("OK"))
 
     def test_link_components(self):
         self.request = Mock(spec=HttpRequest)
         self.request.get_host.return_value = "rapidpro.io"
-        response = self.middleware.process_request(self.request)
-        self.assertIsNone(response)
+        response = self.middleware(self.request)
+        self.assertEqual(response.content, "OK")
         self.assertEquals(link_components(self.request, self.admin), dict(protocol="https", hostname="app.rapidpro.io"))
 
         with self.settings(HOSTNAME="rapidpro.io"):

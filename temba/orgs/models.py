@@ -273,7 +273,7 @@ class Org(SmartModel):
             return org
 
     def get_branding(self):
-        from temba.middleware import BrandingMiddleware
+        from temba.utils.middleware import BrandingMiddleware
         return BrandingMiddleware.get_branding_for_host(self.brand)
 
     def lock_on(self, lock, qualifier=None):
