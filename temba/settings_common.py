@@ -166,6 +166,7 @@ MIDDLEWARE = (
     'temba.utils.middleware.ExceptionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'temba.utils.middleware.DisableMiddleware',
+    'temba.utils.middleware.TimeMonitorMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
