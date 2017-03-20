@@ -1432,6 +1432,13 @@ class MiddlewareTest(TembaTest):
         response = self.client.get(reverse('public.public_index'))
         self.assertEqual(response.context['request'].branding, settings.BRANDING['rapidpro.io'])
 
+    def test_flow_simulation(self):
+        Contact.set_simulation(True)
+
+        self.client.get(reverse('public.public_index'))
+
+        self.assertFalse(Contact.get_simulation())
+
 
 class ProfilerTest(TembaTest):
     @time_monitor(threshold=50)
