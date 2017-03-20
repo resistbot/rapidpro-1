@@ -92,8 +92,9 @@ class TimeMonitorMiddleware(BaseMiddleware):
         response = self.get_response(request)
 
         time_taken = time.time() - start
+        time_limit = getattr(settings, 'LOG_MIN_DURATION_REQUEST', 0)
 
-        if time_taken > 30:
+        if time_limit and time_taken > time_limit:
             logger.error('Request to %s took %.1f seconds.' % (request.get_full_path(), time_taken), extra={'stack': True})
 
         return response
