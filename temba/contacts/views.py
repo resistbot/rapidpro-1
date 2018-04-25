@@ -4,6 +4,8 @@ from __future__ import absolute_import, division, print_function, unicode_litera
 import json
 import regex
 import six
+import logging
+from elasticsearch.serializer import JSONSerializer as es_JSONSerializer
 
 from collections import OrderedDict
 from datetime import timedelta
@@ -30,12 +32,15 @@ from temba.utils import analytics, languages, on_transaction_commit
 from temba.utils.dates import datetime_to_ms, ms_to_datetime
 from temba.utils.fields import Select2Field
 from temba.utils.text import slugify_with
-from temba.utils.views import BaseActionForm
+from temba.utils.views import BaseActionForm, ESPaginationMixin
 from .models import Contact, ContactGroup, ContactGroupCount, ContactField, ContactURN, URN, URN_SCHEME_CONFIG
 from .models import ExportContactsTask, TEL_SCHEME
 from .omnibox import omnibox_query, omnibox_results_to_dict
 from .search import SearchException, parse_query
 from .tasks import export_contacts_task
+
+
+logger = logging.getLogger(__name__)
 
 
 class RemoveContactForm(forms.Form):
@@ -107,10 +112,11 @@ class ContactGroupForm(forms.ModelForm):
             if parsed_query.can_be_dynamic_group():
                 return cleaned_query
             else:
-                raise forms.ValidationError(
-                    _('You cannot create a dynamic group based on "name" or "id".')
-                )
-        except SearchException as e:
+                raise forms.ValidationError(_('You cannot create a dynamic group based on "name" or "id".'))
+        except forms.ValidationError as e:
+            raise e
+
+        except Exception as e:
             raise forms.ValidationError(six.text_type(e))
 
     class Meta:
@@ -118,7 +124,7 @@ class ContactGroupForm(forms.ModelForm):
         model = ContactGroup
 
 
-class ContactListView(OrgPermsMixin, SmartListView):
+class ContactListView(ESPaginationMixin, OrgPermsMixin, SmartListView):
     """
     Base class for contact list views with contact folders and groups listed by the side
     """
@@ -152,16 +158,46 @@ class ContactListView(OrgPermsMixin, SmartListView):
         else:
             qs = group.contacts.all()
 
-        return qs.filter(is_test=False).order_by('-id').prefetch_related('org', 'all_groups')
+        the_qs = qs.filter(is_test=False).order_by('-id').prefetch_related('org', 'all_groups')
+
+        if search_query:
+            from .search import contact_es_search
+            from temba.utils.es import ES
+            try:
+                es_search = contact_es_search(org, search_query, group).source(fields=('id', )).using(ES)
+
+                qs_count = the_qs.count()
+
+                if abs(qs_count - int(es_search.count())) > 1 and (the_qs.count() > 0 and the_qs.first().modified_on < timezone.now() - timedelta(seconds=30)):  # pragma: no cover
+                    logger.error(
+                        'Contact query result mismatch, DB={}, ES={}, search_text=\'{}\', ES_query={}'.format(
+                            the_qs.count(), es_search.count(), search_query,
+                            es_JSONSerializer().dumps(es_search.to_dict())
+                        )
+                    )
+
+                return es_search
+
+            except SearchException as e:
+                self.search_error = six.text_type(e)
+                logger.exception("Exception while executing contact query. search_text={}".format(search_query))
+
+                # this should be an empty resultset
+                return Contact.objects.none()
+        else:
+            # if user search is not defined, use DB to select contacts
+            test_contact_ids = Contact.objects.filter(org=org, is_test=True).values_list('id', flat=True)
+            return group.contacts.all().exclude(id__in=test_contact_ids).order_by('-id').prefetch_related('org', 'all_groups')
 
     def get_context_data(self, **kwargs):
         org = self.request.user.get_org()
         counts = ContactGroup.get_system_group_counts(org)
+        group = self.derive_group()
 
-        # if there isn't a search filtering the queryset, we can replace the count function with a quick cache lookup to
-        # speed up paging
-        if self.system_group and 'search' not in self.request.GET:
-            self.object_list.count = lambda: counts[self.system_group]
+        # if there isn't a search filtering the queryset, we can replace the count function using ContactGroupCounts
+        if group and 'search' not in self.request.GET:
+            group_count = ContactGroupCount.get_totals([group])
+            self.object_list.count = lambda: group_count[group]
 
         context = super(ContactListView, self).get_context_data(**kwargs)
 
@@ -787,9 +823,9 @@ class ContactCRUDL(SmartCRUDL):
             contact_fields = []
             fields = ContactField.objects.filter(org=contact.org, is_active=True).order_by('label', 'pk')
             for field in fields:
-                value = getattr(contact, '__field__%s' % field.key)
+                value = contact.get_field_value(field)
                 if value:
-                    display = Contact.get_field_display_for_value(field, value)
+                    display = contact.get_field_display(field)
                     contact_fields.append(dict(id=field.id, label=field.label, value=display, featured=field.show_in_table))
 
             # stuff in the contact's language in the fields as well
@@ -1145,7 +1181,7 @@ class ContactCRUDL(SmartCRUDL):
                 contact_field = ContactField.objects.filter(id=field_id).first()
                 context['contact_field'] = contact_field
                 if contact_field:
-                    context['value'] = self.get_object().get_field_display(contact_field.key)
+                    context['value'] = self.get_object().get_field_display(contact_field)
             return context
 
     class Block(OrgPermsMixin, SmartUpdateView):
@@ -1306,30 +1342,29 @@ class ManageFieldsForm(forms.Form):
         super(ManageFieldsForm, self).__init__(*args, **kwargs)
 
     def clean(self):
-        used_labels = []
-        for key in self.cleaned_data:
-            if key.startswith('field_'):
-                idx = key[6:]
-                field = self.cleaned_data[key]
-                label = self.cleaned_data["label_%s" % idx]
+        used_labels = set()
+        for key in sorted(key for key in self.cleaned_data.keys() if key.startswith('field_')):
+            idx = key[6:]
+            field = self.cleaned_data[key]
+            label = self.cleaned_data["label_%s" % idx]
 
-                if label:
-                    if not ContactField.is_valid_label(label):
-                        raise forms.ValidationError(_("Field names can only contain letters, numbers and hypens"))
+            if label:
+                if not ContactField.is_valid_label(label):
+                    raise forms.ValidationError(_("Field names can only contain letters, numbers and hypens"))
 
-                    if label.lower() in used_labels:
-                        raise forms.ValidationError(_("Field names must be unique. '%s' is duplicated") % label)
+                if label.lower() in used_labels:
+                    raise forms.ValidationError(_("Field names must be unique. '%s' is duplicated") % label)
 
-                    elif not ContactField.is_valid_key(ContactField.make_key(label)):
-                        raise forms.ValidationError(_("Field name '%s' is a reserved word") % label)
-                    used_labels.append(label.lower())
-                else:
-                    # don't allow fields that are dependencies for flows be removed
-                    if field != '__new_field':
-                        from temba.flows.models import Flow
-                        flow = Flow.objects.filter(org=self.org, field_dependencies__in=[field]).first()
-                        if flow:
-                            raise forms.ValidationError(_('The field "%s" cannot be removed while it is still used in the flow "%s"' % (field.label, flow.name)))
+                elif not ContactField.is_valid_key(ContactField.make_key(label)):
+                    raise forms.ValidationError(_("Field name '%s' is a reserved word") % label)
+                used_labels.add(label.lower())
+            else:
+                # don't allow fields that are dependencies for flows be removed
+                if field != '__new_field':
+                    from temba.flows.models import Flow
+                    flow = Flow.objects.filter(org=self.org, field_dependencies__in=[field]).first()
+                    if flow:
+                        raise forms.ValidationError(_('The field "%s" cannot be removed while it is still used in the flow "%s"' % (field.label, flow.name)))
 
         return self.cleaned_data
 

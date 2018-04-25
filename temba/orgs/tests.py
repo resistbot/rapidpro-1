@@ -103,6 +103,17 @@ class OrgTest(TembaTest):
         self.assertEqual(self.org.primary_language.name, "Kinyarwanda")
         self.assertEqual(self.org.get_language_codes(), {'eng', 'kin'})
 
+    def test_channel_prefixes(self):
+        mtn = Channel.create(self.org, self.admin, 'RW', 'KN', "MTN", "5050", {"matching_prefixes": ["25078"]})
+        tigo = Channel.create(self.org, self.admin, 'RW', 'KN', "Tigo", "5050", {"matching_prefixes": ["25072"]})
+
+        joe = self.create_contact("Joe")
+        mtn_urn = ContactURN.get_or_create(self.org, joe, "tel:+250788383383")
+        tigo_urn = ContactURN.get_or_create(self.org, joe, "tel:+250722383383")
+
+        self.assertEqual(mtn, self.org.get_channel_for_role(Channel.ROLE_SEND, 'tel', mtn_urn))
+        self.assertEqual(tigo, self.org.get_channel_for_role(Channel.ROLE_SEND, 'tel', tigo_urn))
+
     def test_get_channel_countries(self):
         self.assertEqual(self.org.get_channel_countries(), [])
 
@@ -1401,16 +1412,6 @@ class OrgTest(TembaTest):
         self.assertEqual(self.org.config['CHATBASE_AGENT_NAME'], 'chatbase_agent')
         self.assertEqual(self.org.config['CHATBASE_VERSION'], '1.0')
 
-        with self.assertRaises(Exception):
-            contact = self.create_contact('Anakin Skywalker', '+12067791212')
-            msg = self.create_msg(contact=contact, text="favs")
-            Msg.process_message(msg)
-
-        with self.settings(SEND_CHATBASE=True), patch('requests.post'):
-            contact = self.create_contact('Anakin Skywalker', '+12067791212')
-            msg = self.create_msg(contact=contact, text="favs")
-            Msg.process_message(msg)
-
         org_home_url = reverse('orgs.org_home')
 
         response = self.client.get(org_home_url)
@@ -1422,13 +1423,6 @@ class OrgTest(TembaTest):
 
         self.org.refresh_from_db()
         self.assertEqual((None, None), self.org.get_chatbase_credentials())
-
-        with self.settings(SEND_CHATBASE=True), patch('requests.post') as mock_post:
-            contact = self.create_contact('Anakin Skywalker', '+12067791212')
-            msg = self.create_msg(contact=contact, text="favs")
-            Msg.process_message(msg)
-
-            self.assertEqual(len(mock_post.mock_calls), 0)
 
     def test_resthooks(self):
         # no hitting this page without auth
@@ -2024,10 +2018,14 @@ class AnonOrgTest(TembaTest):
         self.assertContains(response, ContactURN.ANON_MASK_HTML)
 
         # can't search for it
-        response = self.client.get(reverse('contacts.contact_list') + "?search=788")
+        with patch('temba.utils.es.ES') as mock_ES:
+            mock_ES.search.return_value = {'_hits': []}
+            mock_ES.count.return_value = {'count': 0}
+            response = self.client.get(reverse('contacts.contact_list') + "?search=788")
 
-        # can't look for 788 as that is in the search box..
-        self.assertNotContains(response, "123123")
+            # can't look for 788 as that is in the search box..
+            self.assertNotContains(response, "123123")
+            self.assertContains(response, 'No matching contacts.')
 
         # create a flow
         flow = self.get_flow('color')
@@ -2668,7 +2666,7 @@ class BulkExportTest(TembaTest):
         settings.BRANDING[settings.DEFAULT_BRAND]['tiers'] = dict(import_flows=1, multi_user=100000, multi_org=1000000)
         post_data = dict(import_file=open('%s/test_flows/new_mother.json' % settings.MEDIA_ROOT, 'rb'))
         response = self.client.post(reverse('orgs.org_import'), post_data)
-        self.assertEqual(response.context['form'].errors['import_file'][0], 'Sorry, import is a premium feature')
+        self.assertFormError(response, 'form', 'import_file', 'Sorry, import is a premium feature')
 
         # now purchase some credits and try again
         TopUp.objects.create(org=self.org, price=1, credits=10000,
@@ -2683,17 +2681,30 @@ class BulkExportTest(TembaTest):
         # now try again with purchased credits, but our file is too old
         post_data = dict(import_file=open('%s/test_flows/too_old.json' % settings.MEDIA_ROOT, 'rb'))
         response = self.client.post(reverse('orgs.org_import'), post_data)
-        self.assertEqual(response.context['form'].errors['import_file'][0], 'This file is no longer valid. Please export a new version and try again.')
+        self.assertFormError(
+            response, 'form', 'import_file', 'This file is no longer valid. Please export a new version and try again.'
+        )
 
         # simulate an unexpected exception during import
         with patch('temba.triggers.models.Trigger.import_triggers') as validate:
             validate.side_effect = Exception('Unexpected Error')
             post_data = dict(import_file=open('%s/test_flows/new_mother.json' % settings.MEDIA_ROOT, 'rb'))
             response = self.client.post(reverse('orgs.org_import'), post_data)
-            self.assertEqual(response.context['form'].errors['import_file'][0], 'Sorry, your import file is invalid.')
+            self.assertFormError(response, 'form', 'import_file', 'Sorry, your import file is invalid.')
 
             # trigger import failed, new flows that were added should get rolled back
             self.assertIsNone(Flow.objects.filter(org=self.org, name='New Mother').first())
+
+        # test import using data that is not parsable
+        junk_binary_data = six.BytesIO(b'\x00!\x00b\xee\x9dh^\x01\x00\x00\x04\x00\x02[Content_Types].xml \xa2\x04\x02(')
+        post_data = dict(import_file=junk_binary_data)
+        response = self.client.post(reverse('orgs.org_import'), post_data)
+        self.assertFormError(response, 'form', 'import_file', 'This file is not a valid flow definition file.')
+
+        junk_json_data = six.BytesIO(b'{"key": "data')
+        post_data = dict(import_file=junk_json_data)
+        response = self.client.post(reverse('orgs.org_import'), post_data)
+        self.assertFormError(response, 'form', 'import_file', 'This file is not a valid flow definition file.')
 
     def test_import_campaign_with_translations(self):
         self.import_file('campaign_import_with_translations')
@@ -3233,11 +3244,11 @@ class ParsingTest(TembaTest):
         self.assertEqual(self.org.parse_location_path(' Nigeria > Lagos '), lagos)
 
     def test_parse_decimal(self):
-        self.assertEqual(self.org.parse_decimal("Not num"), None)
-        self.assertEqual(self.org.parse_decimal("00.123"), Decimal("0.123"))
-        self.assertEqual(self.org.parse_decimal("6e33"), None)
-        self.assertEqual(self.org.parse_decimal("6e5"), Decimal("600000"))
-        self.assertEqual(self.org.parse_decimal("9999999999999999999999999"), None)
-        self.assertEqual(self.org.parse_decimal(""), None)
-        self.assertEqual(self.org.parse_decimal("NaN"), None)
-        self.assertEqual(self.org.parse_decimal("Infinity"), None)
+        self.assertEqual(self.org.parse_number("Not num"), None)
+        self.assertEqual(self.org.parse_number("00.123"), Decimal("0.123"))
+        self.assertEqual(self.org.parse_number("6e33"), None)
+        self.assertEqual(self.org.parse_number("6e5"), Decimal("600000"))
+        self.assertEqual(self.org.parse_number("9999999999999999999999999"), None)
+        self.assertEqual(self.org.parse_number(""), None)
+        self.assertEqual(self.org.parse_number("NaN"), None)
+        self.assertEqual(self.org.parse_number("Infinity"), None)

@@ -5,14 +5,12 @@ import base64
 import hashlib
 import hmac
 import json
+
 import requests
-
-from six.moves.urllib.parse import quote_plus
-
 from django.conf import settings
 from django.db.models import Model
 from django.utils.http import urlencode
-from django.utils.encoding import force_bytes, force_text
+from six.moves.urllib.parse import quote_plus
 from twython import Twython
 from twython import TwythonAuthError
 from twython import TwythonError
@@ -169,6 +167,6 @@ class TembaTwython(Twython):  # pragma: no cover
         return self.post('https://api.twitter.com/1.1/account_activity/all/%s/subscriptions.json' % env_name)
 
 
-def generate_twitter_signature(content, consumer_secret):
-    token = hmac.new(force_bytes(consumer_secret.encode('ascii')), msg=force_bytes(content), digestmod=hashlib.sha256).digest()
-    return 'sha256=' + force_text(base64.standard_b64encode(token))
+def generate_twitter_signature(content, consumer_secret):  # pragma: no cover
+    token = hmac.new(bytes(consumer_secret.encode('ascii')), msg=content, digestmod=hashlib.sha256).digest()
+    return 'sha256=' + base64.standard_b64encode(token)

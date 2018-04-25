@@ -22,7 +22,7 @@ from temba.flows.models import FlowLabel, FlowRun, RuleSet, ActionSet, Flow
 from temba.locations.models import BoundaryAlias
 from temba.msgs.models import Msg
 from temba.orgs.models import Language
-from temba.tests import TembaTest, AnonymousOrg
+from temba.tests import TembaTest, AnonymousOrg, matchers
 from temba.utils.dates import datetime_to_json_date
 from temba.values.models import Value
 from temba.api.models import APIToken
@@ -464,7 +464,11 @@ class APITest(TembaTest):
         self.assertEqual(run.is_active, True)
         self.assertEqual(run.is_completed(), False)
         self.assertEqual(run.path, [
-            {'node_uuid': flow.entry_uuid, 'arrived_on': '2015-08-25T11:09:30.088000+00:00'}
+            {
+                'uuid': matchers.UUID4String(),
+                'node_uuid': flow.entry_uuid,
+                'arrived_on': '2015-08-25T11:09:30.088000+00:00'
+            }
         ])
 
         # check flow stats
@@ -633,7 +637,22 @@ class APITest(TembaTest):
         self.assertEqual(run.is_active, True)
         self.assertEqual(run.is_completed(), False)
         self.assertEqual(run.path, [
-            {'node_uuid': color_prompt.uuid, 'arrived_on': '2015-08-25T11:09:30.088000+00:00'}
+            {
+                'uuid': matchers.UUID4String(),
+                'node_uuid': color_prompt.uuid,
+                'arrived_on': '2015-08-25T11:09:30.088000+00:00'
+            }
+        ])
+        self.assertEqual(run.events, [
+            {
+                'type': 'msg_created',
+                'created_on': matchers.ISODate(),
+                'step_uuid': run.path[0]['uuid'],
+                'msg': {
+                    'uuid': matchers.UUID4String(),
+                    'text': 'What is your favorite color?'
+                }
+            }
         ])
 
         # outgoing message for reply
@@ -698,10 +717,29 @@ class APITest(TembaTest):
         self.assertEqual(run.is_active, False)
         self.assertEqual(run.is_completed(), True)
         self.assertEqual(run.path, [
-            {'node_uuid': color_prompt.uuid, 'arrived_on': '2015-08-25T11:09:30.088000+00:00', 'exit_uuid': color_prompt.exit_uuid},
-            {'node_uuid': color_ruleset.uuid, 'arrived_on': '2015-08-25T11:11:30.088000+00:00', 'exit_uuid': orange_rule.uuid},
-            {'node_uuid': color_reply.uuid, 'arrived_on': '2015-08-25T11:13:30.088000+00:00', 'exit_uuid': color_reply.exit_uuid},
-            {'node_uuid': new_node['uuid'], 'arrived_on': '2015-08-25T11:15:30.088000+00:00'}
+            {
+                'uuid': matchers.UUID4String(),
+                'node_uuid': color_prompt.uuid,
+                'arrived_on': '2015-08-25T11:09:30.088000+00:00',
+                'exit_uuid': color_prompt.exit_uuid
+            },
+            {
+                'uuid': matchers.UUID4String(),
+                'node_uuid': color_ruleset.uuid,
+                'arrived_on': '2015-08-25T11:11:30.088000+00:00',
+                'exit_uuid': orange_rule.uuid
+            },
+            {
+                'uuid': matchers.UUID4String(),
+                'node_uuid': color_reply.uuid,
+                'arrived_on': '2015-08-25T11:13:30.088000+00:00',
+                'exit_uuid': color_reply.exit_uuid
+            },
+            {
+                'uuid': matchers.UUID4String(),
+                'node_uuid': new_node['uuid'],
+                'arrived_on': '2015-08-25T11:15:30.088000+00:00'
+            }
         ])
 
         # joe should have an urn now
@@ -1068,37 +1106,39 @@ class APITest(TembaTest):
 
         # try updating a non-existent field
         response = self.postJSON(url, dict(phone='+250788123456', fields={"real_name": "Andy"}))
+        real_name = ContactField.get_by_key(self.org, 'real_name')
+        contact.refresh_from_db()
         self.assertEqual(201, response.status_code)
-        self.assertIsNotNone(contact.get_field('real_name'))
-        self.assertEqual("Andy", contact.get_field_display("real_name"))
+        self.assertEqual("Andy", contact.get_field_value(real_name))
 
         # create field and try again
         ContactField.get_or_create(self.org, self.user, 'real_name', "Real Name", value_type='T')
         response = self.postJSON(url, dict(phone='+250788123456', fields={"real_name": "Andy"}))
-        contact = Contact.objects.get()
+        contact.refresh_from_db()
         self.assertContains(response, "Andy", status_code=201)
-        self.assertEqual("Andy", contact.get_field_display("real_name"))
+        self.assertEqual("Andy", contact.get_field_value(real_name))
 
         # update field via label (deprecated but allowed)
         response = self.postJSON(url, dict(phone='+250788123456', fields={"Real Name": "Andre"}))
-        contact = Contact.objects.get()
+        contact.refresh_from_db()
         self.assertContains(response, "Andre", status_code=201)
-        self.assertEqual("Andre", contact.get_field_display("real_name"))
+        self.assertEqual("Andre", contact.get_field_value(real_name))
 
         # try when contact field have same key and label
         state = ContactField.get_or_create(self.org, self.user, 'state', "state", value_type='T')
         response = self.postJSON(url, dict(phone='+250788123456', fields={"state": "IL"}))
         self.assertContains(response, "IL", status_code=201)
-        contact = Contact.objects.get()
-        self.assertEqual("IL", contact.get_field_display("state"))
-        self.assertEqual("Andre", contact.get_field_display("real_name"))
+        contact.refresh_from_db()
+        self.assertEqual("IL", contact.get_field_value(state))
+        self.assertEqual("Andre", contact.get_field_value(real_name))
 
         # try when contact field is not active
         state.is_active = False
         state.save()
         response = self.postJSON(url, dict(phone='+250788123456', fields={"state": "VA"}))
+        contact.refresh_from_db()
         self.assertEqual(response.status_code, 201)
-        self.assertEqual("VA", Value.objects.get(contact=contact, contact_field=state).string_value)   # unchanged
+        self.assertEqual("VA", contact.get_field_value(state))   # unchanged
 
         drdre = Contact.objects.get()
 

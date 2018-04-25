@@ -10,7 +10,7 @@ from django.conf import settings
 from django.core.urlresolvers import reverse
 from django.utils import timezone
 from django_redis import get_redis_connection
-from django.db import transaction
+from django.db import transaction, connection
 from django.contrib.auth.models import User
 from django.test import override_settings
 from mock import patch
@@ -43,6 +43,8 @@ class MsgTest(TembaTest):
         super(MsgTest, self).setUp()
 
         self.joe = self.create_contact("Joe Blow", "123")
+        ContactURN.create(self.org, self.joe, "tel:789")
+
         self.frank = self.create_contact("Frank Blow", "321")
         self.kevin = self.create_contact("Kevin Durant", "987")
 
@@ -451,37 +453,37 @@ class MsgTest(TembaTest):
         self.assertContains(response, "Outbox (1)")
         self.assertEqual(set(response.context_data['object_list']), {msg1})
 
-        broadcast2 = Broadcast.create(self.channel.org, self.admin, 'kLab is an awesome place for @contact.name',
+        broadcast2 = Broadcast.create(self.channel.org, self.admin, 'kLab is an awesome place',
                                       [self.kevin, self.joe_and_frank])
 
         # now send the broadcast so we have messages
         broadcast2.send(trigger_send=False)
-        msg4, msg3, msg2 = tuple(Msg.objects.filter(broadcast=broadcast2))
+        msg4, msg3, msg2 = tuple(Msg.objects.filter(broadcast=broadcast2).order_by('-created_on', '-id'))
 
         with self.assertNumQueries(38):
             response = self.client.get(reverse('msgs.msg_outbox'))
 
         self.assertContains(response, "Outbox (4)")
-        self.assertEqual(set(response.context_data['object_list']), {msg4, msg3, msg2, msg1})
+        self.assertEqual(list(response.context_data['object_list']), [msg4, msg3, msg2, msg1])
 
         response = self.client.get("%s?search=kevin" % reverse('msgs.msg_outbox'))
-        self.assertEqual(set(response.context_data['object_list']), {Msg.objects.get(contact=self.kevin)})
+        self.assertEqual(list(response.context_data['object_list']), [Msg.objects.get(contact=self.kevin)])
 
         response = self.client.get("%s?search=joe" % reverse('msgs.msg_outbox'))
-        self.assertEqual(set(response.context_data['object_list']), {Msg.objects.get(contact=self.joe)})
+        self.assertEqual(list(response.context_data['object_list']), [Msg.objects.get(contact=self.joe)])
 
         response = self.client.get("%s?search=frank" % reverse('msgs.msg_outbox'))
-        self.assertEqual(set(response.context_data['object_list']), {Msg.objects.get(contact=self.frank)})
+        self.assertEqual(list(response.context_data['object_list']), [Msg.objects.get(contact=self.frank)])
 
         response = self.client.get("%s?search=just" % reverse('msgs.msg_outbox'))
-        self.assertEqual(set(response.context_data['object_list']), set())
+        self.assertEqual(list(response.context_data['object_list']), list())
 
-        response = self.client.get("%s?search=is" % reverse('msgs.msg_outbox'))
-        self.assertEqual(set(response.context_data['object_list']), {msg4, msg3, msg2, msg1})
+        response = self.client.get("%s?search=klab" % reverse('msgs.msg_outbox'))
+        self.assertEqual(list(response.context_data['object_list']), [msg4, msg3, msg2])
 
         # make sure variables that are replaced in text messages match as well
         response = self.client.get("%s?search=durant" % reverse('msgs.msg_outbox'))
-        self.assertEqual(set(response.context_data['object_list']), {Msg.objects.get(contact=self.kevin)})
+        self.assertEqual(list(response.context_data['object_list']), [Msg.objects.get(contact=self.kevin)])
 
     def do_msg_action(self, url, msgs, action, label=None, label_add=True):
         post_data = dict()
@@ -514,8 +516,9 @@ class MsgTest(TembaTest):
 
         # visit inbox page as a manager of the organization
         with self.assertNumQueries(60):
-            response = self.fetch_protected(inbox_url, self.admin)
+            response = self.fetch_protected(inbox_url + "?refresh=10000", self.admin)
 
+        self.assertEqual(response.context['refresh'], 20000)
         self.assertEqual(response.context['object_list'].count(), 5)
         self.assertEqual(response.context['folders'][0]['url'], '/msg/inbox/')
         self.assertEqual(response.context['folders'][0]['count'], 5)
@@ -713,11 +716,12 @@ class MsgTest(TembaTest):
         self.assertEqual(302, response.status_code)
 
         # visit failed page as an administrator
-        with self.assertNumQueries(61):
+        with self.assertNumQueries(64):
             response = self.fetch_protected(failed_url, self.admin)
 
         self.assertEqual(response.context['object_list'].count(), 3)
         self.assertEqual(response.context['actions'], ['resend'])
+        self.assertContains(response, "Export")
 
         self.assertContains(response, reverse('channels.channellog_read', args=[log.id]))
 
@@ -1252,9 +1256,9 @@ class BroadcastTest(TembaTest):
         self.assertEqual(40, len(parts[3]))
 
     def test_substitute_variables(self):
-        ContactField.get_or_create(self.org, self.admin, 'goats', "Goats", False, Value.TYPE_DECIMAL)
+        ContactField.get_or_create(self.org, self.admin, 'goats', "Goats", False, Value.TYPE_NUMBER)
         self.joe.set_field(self.user, 'goats', "3 ")
-        ContactField.get_or_create(self.org, self.admin, 'temp', "Temperature", False, Value.TYPE_DECIMAL)
+        ContactField.get_or_create(self.org, self.admin, 'temp', "Temperature", False, Value.TYPE_NUMBER)
         self.joe.set_field(self.user, 'temp', "37.45")
         ContactField.get_or_create(self.org, self.admin, 'dob', "Date of birth", False, Value.TYPE_DATETIME)
         self.joe.set_field(self.user, 'dob', "28/5/1981")
@@ -1276,7 +1280,7 @@ class BroadcastTest(TembaTest):
         self.assertEqual(("Hello Joe Blow", []), substitute("Hello @(PROPER(contact))", dict()))
         self.assertEqual(("Hello JOE", []), substitute("Hello @(UPPER(contact.first_name))", dict()))
         self.assertEqual(("Hello 3", []), substitute("Hello @(contact.goats)", dict()))
-        self.assertEqual(("Hello 37.45000000", []), substitute("Hello @(contact.temp)", dict()))
+        self.assertEqual(("Hello 37.45", []), substitute("Hello @(contact.temp)", dict()))
         self.assertEqual(("Hello 37", []), substitute("Hello @(INT(contact.temp))", dict()))
         self.assertEqual(("Hello 37.45", []), substitute("Hello @(FIXED(contact.temp))", dict()))
 
@@ -1899,6 +1903,7 @@ class ScheduleTest(TembaTest):
         channel_models.SEND_QUEUE_DEPTH = 500
         channel_models.SEND_BATCH_SIZE = 100
 
+    @override_settings(LEGACY_CHANNELS=['EX'])
     def test_batch(self):
         # broadcast out to 11 contacts to test our batching
         contacts = []
@@ -2257,7 +2262,9 @@ class CeleryTaskTest(TembaTest):
         fullmsg = "Object %r unexpectedly not found in the database" % obj
         fullmsg += ": " + msg if msg else ""
         try:
-            type(obj).objects.using('direct').get(pk=obj.pk)
+            # close the current connection to the database, so we force it to open a new connection
+            connection.close()
+            type(obj).objects.get(pk=obj.pk)
         except obj.DoesNotExist:
             self.fail(fullmsg)
 

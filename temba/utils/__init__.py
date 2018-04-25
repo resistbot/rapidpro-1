@@ -40,7 +40,7 @@ def percentage(numerator, denominator):
     return int(100.0 * numerator / denominator + .5)
 
 
-def format_decimal(val):
+def format_number(val):
     """
     Formats a decimal value without trailing zeros
     """
@@ -49,6 +49,12 @@ def format_decimal(val):
     elif val == 0:
         return '0'
 
+    # we don't support non-finite values
+    if not val.is_finite():
+        return ''
+
+    # convert our decimal to a value without exponent
+    val = val.quantize(Decimal(1)) if val == val.to_integral() else val.normalize()
     val = six.text_type(val)
 
     if '.' in val:

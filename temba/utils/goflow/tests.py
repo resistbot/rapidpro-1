@@ -15,17 +15,17 @@ from .client import serialize_field, serialize_label, serialize_channel, get_cli
 class SerializationTest(TembaTest):
     def test_serialize_field(self):
         gender = self.create_field('gender', "Gender", Value.TYPE_TEXT)
-        age = self.create_field('age', "Age", Value.TYPE_DECIMAL)
+        age = self.create_field('age', "Age", Value.TYPE_NUMBER)
 
         self.assertEqual(serialize_field(gender), {
             'key': "gender",
-            'label': "Gender",
+            'name': "Gender",
             'value_type': "text"
         })
         self.assertEqual(serialize_field(age), {
             'key': "age",
-            'label': "Age",
-            'value_type': "numeric"
+            'name': "Age",
+            'value_type': "number"
         })
 
     def test_serialize_label(self):
@@ -47,7 +47,7 @@ class ClientTest(TembaTest):
         super(ClientTest, self).setUp()
 
         self.gender = self.create_field('gender', "Gender", Value.TYPE_TEXT)
-        self.age = self.create_field('age', "Age", Value.TYPE_DECIMAL)
+        self.age = self.create_field('age', "Age", Value.TYPE_NUMBER)
         self.contact = self.create_contact("Bob", number="+12345670987", urn='twitterid:123456785#bobby')
         self.testers = self.create_group("Testers", [self.contact])
         self.client = get_client()
@@ -62,7 +62,7 @@ class ClientTest(TembaTest):
             self.contact.set_field(self.admin, 'gender', "M")
             self.contact.set_field(self.admin, 'age', 36)
 
-            self.assertEqual(self.client.request_builder(1234).add_contact_changed(self.contact).request['events'], [{
+            self.assertEqual(self.client.request_builder(self.org, 1234).add_contact_changed(self.contact).request['events'], [{
                 'type': "contact_changed",
                 'created_on': "2018-01-18T14:24:30+00:00",
                 'contact': {
@@ -75,8 +75,8 @@ class ClientTest(TembaTest):
                         'tel:+12345670987?channel=%s' % str(self.channel.uuid)
                     ],
                     'fields': {
-                        'gender': {'value': 'M', 'created_on': "2018-01-18T14:24:30+00:00"},
-                        'age': {'value': '36', 'created_on': "2018-01-18T14:24:30+00:00"}
+                        'gender': {'text': 'M'},
+                        'age': {'text': '36', 'number': '36'},
                     },
                     'groups': [
                         {'uuid': str(self.testers.uuid), 'name': "Testers"}
@@ -86,13 +86,13 @@ class ClientTest(TembaTest):
 
     def test_add_environment_changed(self):
         with patch('django.utils.timezone.now', return_value=datetime(2018, 1, 18, 14, 24, 30, 0, tzinfo=pytz.UTC)):
-            self.assertEqual(self.client.request_builder(1234).add_environment_changed(self.org).request['events'], [{
+            self.assertEqual(self.client.request_builder(self.org, 1234).add_environment_changed().request['events'], [{
                 'type': "environment_changed",
                 'created_on': "2018-01-18T14:24:30+00:00",
                 'environment': {
-                    'date_format': 'dd-MM-yyyy',
+                    'date_format': 'DD-MM-YYYY',
                     'languages': [],
-                    'time_format': 'hh:mm',
+                    'time_format': 'tt:mm',
                     'timezone': 'Africa/Kigali'
                 }
             }])
@@ -104,7 +104,7 @@ class ClientTest(TembaTest):
 
         with patch('django.utils.timezone.now', return_value=datetime(2018, 1, 18, 14, 24, 30, 0, tzinfo=pytz.UTC)):
 
-            self.assertEqual(self.client.request_builder(1234).add_run_expired(run).request['events'], [{
+            self.assertEqual(self.client.request_builder(self.org, 1234).add_run_expired(run).request['events'], [{
                 'type': "run_expired",
                 'created_on': run.exited_on.isoformat(),
                 'run_uuid': str(run.uuid)
@@ -118,6 +118,6 @@ class ClientTest(TembaTest):
         contact = self.create_contact("Joe", number='+29638356667')
 
         with self.assertRaises(FlowServerException) as e:
-            self.client.request_builder(1234).start_manual(self.org, contact, flow)
+            self.client.request_builder(self.org, 1234).start_manual(contact, flow)
 
         self.assertEqual(str(e.exception), "Invalid request: Bad request\nDoh!")

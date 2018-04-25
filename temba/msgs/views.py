@@ -130,7 +130,7 @@ class InboxView(OrgPermsMixin, SmartListView):
             last_90 = timezone.now() - timedelta(days=90)
             queryset = queryset.filter(created_on__gte=last_90)
 
-        return queryset.order_by('-created_on', '-id')
+        return queryset.order_by('-created_on', '-id').distinct('created_on', 'id')
 
     def get_context_data(self, **kwargs):
         org = self.request.user.get_org()
@@ -168,6 +168,12 @@ class InboxView(OrgPermsMixin, SmartListView):
         context['current_label'] = label
         context['export_url'] = self.derive_export_url()
         context['show_channel_logs'] = self.show_channel_logs
+
+        # if refresh was passed in, increase it by our normal refresh time
+        previous_refresh = self.request.GET.get('refresh')
+        if previous_refresh:
+            context['refresh'] = int(previous_refresh) + self.derive_refresh()
+
         return context
 
     def get_gear_links(self):

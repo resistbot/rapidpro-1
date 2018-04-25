@@ -121,7 +121,7 @@ class AdminBoundary(MPTTModel, models.Model):
         _update_child_paths(self)
 
     @classmethod
-    def create(cls, osm_id, name, level, parent=None):
+    def create(cls, osm_id, name, level, parent=None, **kwargs):
         """
         Create method that takes care of creating path based on name and parent
         """
@@ -129,7 +129,7 @@ class AdminBoundary(MPTTModel, models.Model):
         if parent is not None:
             path = parent.path + AdminBoundary.PADDED_PATH_SEPARATOR + name
 
-        return AdminBoundary.objects.create(osm_id=osm_id, name=name, level=level, parent=parent, path=path)
+        return AdminBoundary.objects.create(osm_id=osm_id, name=name, level=level, parent=parent, path=path, **kwargs)
 
     @classmethod
     def strip_last_path(cls, path):
@@ -141,6 +141,20 @@ class AdminBoundary(MPTTModel, models.Model):
             raise Exception("strip_last_path called without a path to strip")
 
         return AdminBoundary.PADDED_PATH_SEPARATOR.join(parts[:-1])
+
+    @classmethod
+    def get_by_path(cls, org, path):
+        cache = getattr(org, '_abs', {})
+
+        if not cache:
+            setattr(org, '_abs', cache)
+
+        boundary = cache.get(path)
+        if not boundary:
+            boundary = AdminBoundary.objects.filter(path=path).first()
+            cache[path] = boundary
+
+        return boundary
 
     def __str__(self):
         return "%s" % self.name

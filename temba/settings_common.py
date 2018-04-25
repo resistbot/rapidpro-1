@@ -313,6 +313,7 @@ BRANDING = {
         'splash': '/brands/rapidpro/splash.jpg',
         'logo': '/brands/rapidpro/logo.png',
         'allow_signups': True,
+        'flow_types': ['F', 'V', 'S', 'U'],  # see Flow.FLOW, Flow.VOICE, Flow.SURVEY, Flow.USSD
         'tiers': dict(import_flows=0, multi_user=0, multi_org=0),
         'bundles': [],
         'welcome_packs': [dict(size=5000, name="Demo Account"), dict(size=100000, name="UNICEF Account")],
@@ -978,6 +979,14 @@ CELERYBEAT_SCHEDULE = {
         'task': 'squash_contactgroupcounts',
         'schedule': timedelta(seconds=300),
     },
+    "resolve-twitter-ids-task": {
+        'task': 'resolve_twitter_ids_task',
+        'schedule': timedelta(seconds=900)
+    },
+    "refresh-jiochat-access-tokens": {
+        'task': 'refresh_jiochat_access_tokens',
+        'schedule': timedelta(seconds=3600)
+    }
 }
 
 # Mapping of task name to task function path, used when CELERY_ALWAYS_EAGER is set to True
@@ -1215,9 +1224,11 @@ FLOW_SERVER_DEBUG = False
 FLOW_SERVER_FORCE = False
 
 # -----------------------------------------------------------------------------------
-# Which channel types will be sent using Courier instead of RapidPro
+# These legacy channels still send on RapidPro:
+#   * TT is our old Twitter integration, will be removed ~June 2018
+#   * JNU is junebug USSD, which may be removed depending on future of USSD
 # -----------------------------------------------------------------------------------
-COURIER_CHANNELS = set(['CT', 'DK', 'MT', 'WA', 'ZV'])
+LEGACY_CHANNELS = set(['TT', 'JNU'])
 
 # -----------------------------------------------------------------------------------
 # Chatbase integration
@@ -1229,3 +1240,7 @@ DATA_UPLOAD_MAX_NUMBER_FIELDS = 4000
 
 # When reporting metrics we use the hostname of the physical machine, not the hostname of the service
 MACHINE_HOSTNAME = socket.gethostname().split('.')[0]
+
+
+# ElasticSearch configuration (URL RFC-1738)
+ELASTICSEARCH_URL = os.environ.get('ELASTICSEARCH_URL', 'http://localhost:9200')
