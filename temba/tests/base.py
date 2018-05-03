@@ -23,7 +23,9 @@ from django.test import LiveServerTestCase, override_settings
 from django.test.runner import DiscoverRunner
 from django.utils import timezone
 from django.utils.encoding import force_bytes, force_text
+from functools import wraps
 from future.moves.html.parser import HTMLParser
+from mock import patch
 from selenium.webdriver.firefox.webdriver import WebDriver
 from smartmin.tests import SmartminTest
 from temba.contacts.models import Contact, ContactGroup, ContactField, URN
@@ -33,7 +35,7 @@ from temba.locations.models import AdminBoundary
 from temba.flows.models import Flow, ActionSet, RuleSet, FlowStep, FlowRevision, clear_flow_users
 from temba.msgs.models import Msg, INCOMING
 from temba.utils import dict_to_struct, get_anonymous_user
-from temba.values.models import Value
+from temba.values.constants import Value
 from unittest import skipIf
 from uuid import uuid4
 from .http import MockServer
@@ -97,13 +99,64 @@ class AddFlowServerTestsMeta(type):
     def __new__(mcs, name, bases, dct):
         if settings.FLOW_SERVER_URL:
             new_tests = {}
-            for key, val in six.iteritems(dct):
-                if key.startswith('test_') and getattr(val, '_also_in_flowserver', False):
-                    new_func = override_settings(FLOW_SERVER_AUTH_TOKEN='1234', FLOW_SERVER_FORCE=True)(val)
-                    new_tests[key + '_flowserver'] = new_func
+            for key, test_func in six.iteritems(dct):
+                if key.startswith('test_') and getattr(test_func, '_also_in_flowserver', False):
+                    test_without, test_with = mcs._split_test(test_func)
+
+                    new_tests[key] = test_without
+                    new_tests[key + '_flowserver'] = test_with
+
             dct.update(new_tests)
 
         return super(AddFlowServerTestsMeta, mcs).__new__(mcs, name, bases, dct)
+
+    @staticmethod
+    def _split_test(test_func):
+        """
+        Takes a given test function and returns two test functions - one that will run without the flowserver, and one
+        that will run with the flowserver
+        """
+        old_func = test_func
+        new_func = override_settings(FLOW_SERVER_AUTH_TOKEN='1234', FLOW_SERVER_FORCE=True)(test_func)
+
+        @wraps(old_func)
+        def old_wrapper(*args, **kwargs):
+            kwargs['in_flowserver'] = False
+            return old_func(*args, **kwargs)
+
+        @wraps(new_func)
+        def new_wrapper(*args, **kwargs):
+            kwargs['in_flowserver'] = True
+            return new_func(*args, **kwargs)
+
+        return old_wrapper, new_wrapper
+
+
+class ESMockWithScroll:
+
+    def __init__(self, data=None):
+        self.mock_es = patch('temba.utils.es.ES')
+
+        self.data = data if data is not None else []
+
+    def __enter__(self):
+        patched_object = self.mock_es.start()
+
+        patched_object.search.return_value = {
+            "_shards": {"failed": 0, "successful": 10, "total": 10}, "timed_out": False, "took": 1,
+            "_scroll_id": '1',
+            'hits': {'hits': self.data}
+        }
+        patched_object.scroll.return_value = {
+            "_shards": {"failed": 0, "successful": 10, "total": 10}, "timed_out": False, "took": 1,
+            "_scroll_id": '1',
+            'hits': {'hits': []}
+        }
+
+        return patched_object()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.mock_es.stop()
 
 
 class TembaTest(six.with_metaclass(AddFlowServerTestsMeta, SmartminTest)):
