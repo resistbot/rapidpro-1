@@ -13,20 +13,18 @@ import os
 from celery.app.task import Task
 from decimal import Decimal
 from django.conf import settings
-from django.contrib.auth.models import User, Group
+from django.contrib.auth.models import User
 from django.core import checks
 from django.core.management import call_command, CommandError
 from django.core.urlresolvers import reverse
 from django.db import models, connection
-from django.test import override_settings, SimpleTestCase, TestCase
+from django.test import override_settings, TestCase, TransactionTestCase
 from django.utils import timezone
 from django_redis import get_redis_connection
 from mock import patch, PropertyMock
 from openpyxl import load_workbook
+from smartmin.tests import SmartminTestMixin
 from temba.contacts.models import Contact, ContactField, ContactGroup, ContactGroupCount, ExportContactsTask
-from temba.locations.models import AdminBoundary
-from temba.msgs.models import Msg, SystemLabelCount
-from temba.flows.models import FlowRun
 from temba.orgs.models import Org, UserSettings
 from temba.tests import TembaTest, matchers, ESMockWithScroll
 from temba_expressions.evaluator import EvaluationContext, DateStyle
@@ -1160,62 +1158,6 @@ class ExportTest(TembaTest):
 
             self.assertEqual(task2.status, ExportContactsTask.STATUS_FAILED)
 
-    @patch('temba.utils.export.BaseExportTask.MAX_EXCEL_COLS', new_callable=PropertyMock)
-    def test_tableexporter_csv(self, mock_max_cols):
-        test_max_cols = 255
-        mock_max_cols.return_value = test_max_cols
-
-        # tests writing a CSV, that is a file that has more than 255 columns
-        cols = []
-        for i in range(test_max_cols + 1):
-            cols.append("Column %d" % i)
-
-        # create a new exporter
-        exporter = TableExporter(self.task, "test", cols)
-
-        # should be CSV because we have too many columns
-        self.assertTrue(exporter.is_csv)
-
-        # write some rows
-        values = []
-        for i in range(test_max_cols + 1):
-            values.append("Value %d" % i)
-
-        exporter.write_row(values)
-        exporter.write_row(values)
-
-        # ok, let's check the result now
-        temp_file, file_ext = exporter.save_file()
-
-        if six.PY2:
-            csvfile = open(temp_file.name, 'rb')
-        else:
-            csvfile = open(temp_file.name, 'rt')
-
-        import csv
-        reader = csv.reader(csvfile)
-
-        column_row = next(reader, [])
-        self.assertListEqual(cols, column_row)
-
-        values_row = next(reader, [])
-        self.assertListEqual(values, values_row)
-
-        values_row = next(reader, [])
-        self.assertListEqual(values, values_row)
-
-        # should only be three rows
-        empty_row = next(reader, None)
-        self.assertIsNone(empty_row)
-
-        # remove temporary file on PY3
-        if six.PY3:  # pragma: no cover
-            if hasattr(temp_file, 'delete'):
-                if temp_file.delete is False:
-                    os.unlink(temp_file.name)
-            else:
-                os.unlink(temp_file.name)
-
     @patch('temba.utils.export.BaseExportTask.MAX_EXCEL_ROWS', new_callable=PropertyMock)
     def test_tableexporter_xls(self, mock_max_rows):
         test_max_rows = 1500
@@ -1225,23 +1167,28 @@ class ExportTest(TembaTest):
         for i in range(32):
             cols.append("Column %d" % i)
 
-        exporter = TableExporter(self.task, "test", cols)
+        extra_cols = []
+        for i in range(16):
+            extra_cols.append("Extra Column %d" % i)
 
-        # should be an XLS file
-        self.assertFalse(exporter.is_csv)
+        exporter = TableExporter(self.task, "test", "other test", cols, extra_cols)
 
         values = []
         for i in range(32):
             values.append("Value %d" % i)
 
+        extra_values = []
+        for i in range(16):
+            extra_values.append("Extra Value %d" % i)
+
         # write out 1050000 rows, that'll make two sheets
         for i in range(test_max_rows + 200):
-            exporter.write_row(values)
+            exporter.write_row(values, extra_values)
 
         temp_file, file_ext = exporter.save_file()
         workbook = load_workbook(filename=temp_file.name)
 
-        self.assertEqual(2, len(workbook.worksheets))
+        self.assertEqual(4, len(workbook.worksheets))
 
         # check our sheet 1 values
         sheet1 = workbook.worksheets[0]
@@ -1256,11 +1203,27 @@ class ExportTest(TembaTest):
 
         sheet2 = workbook.worksheets[1]
         rows = tuple(sheet2.rows)
+        self.assertEqual(extra_cols, [cell.value for cell in rows[0]])
+        self.assertEqual(extra_values, [cell.value for cell in rows[1]])
+
+        self.assertEqual(test_max_rows, len(list(sheet2.rows)))
+        self.assertEqual(16, len(list(sheet2.columns)))
+
+        sheet3 = workbook.worksheets[2]
+        rows = tuple(sheet3.rows)
         self.assertEqual(cols, [cell.value for cell in rows[0]])
         self.assertEqual(values, [cell.value for cell in rows[1]])
 
-        self.assertEqual(200 + 2, len(list(sheet2.rows)))
-        self.assertEqual(32, len(list(sheet2.columns)))
+        self.assertEqual(200 + 2, len(list(sheet3.rows)))
+        self.assertEqual(32, len(list(sheet3.columns)))
+
+        sheet4 = workbook.worksheets[3]
+        rows = tuple(sheet4.rows)
+        self.assertEqual(extra_cols, [cell.value for cell in rows[0]])
+        self.assertEqual(extra_values, [cell.value for cell in rows[1]])
+
+        self.assertEqual(200 + 2, len(list(sheet4.rows)))
+        self.assertEqual(16, len(list(sheet4.columns)))
 
         if six.PY3:
             os.unlink(temp_file.name)
@@ -1669,22 +1632,11 @@ class MiddlewareTest(TembaTest):
         self.assertContains(self.client.get(reverse('contacts.contact_list')), "Importer des contacts")
 
 
-class MakeTestDBTest(SimpleTestCase):
-    """
-    This command can't be run in a transaction so we have to manually ensure all data is deleted on completion
-    """
-    allow_database_queries = True
-
-    def tearDown(self):
-        Msg.objects.all().delete()
-        FlowRun.objects.all().delete()
-        SystemLabelCount.objects.all().delete()
-        Org.objects.all().delete()
-        User.objects.all().delete()
-        Group.objects.all().delete()
-        AdminBoundary.objects.all().delete()
+class MakeTestDBTest(SmartminTestMixin, TransactionTestCase):
 
     def test_command(self):
+        self.create_anonymous_user()
+
         with ESMockWithScroll():
             call_command('test_db', 'generate', num_orgs=3, num_contacts=30, seed=1234)
 
