@@ -1,5 +1,3 @@
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import, division, print_function, unicode_literals
 
 import base64
 import hashlib
@@ -10,7 +8,7 @@ import requests
 from django.conf import settings
 from django.db.models import Model
 from django.utils.http import urlencode
-from six.moves.urllib.parse import quote_plus
+from urllib.parse import quote_plus
 from twython import Twython
 from twython import TwythonAuthError
 from twython import TwythonError
@@ -23,7 +21,7 @@ from temba.utils.http import HttpEvent
 class TembaTwython(Twython):  # pragma: no cover
 
     def __init__(self, *args, **kwargs):
-        super(TembaTwython, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
         self.events = []
 
     @classmethod

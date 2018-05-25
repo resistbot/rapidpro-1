@@ -1,9 +1,5 @@
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import, division, print_function, unicode_literals
-
 import geojson
 import logging
-import six
 
 from django.contrib.gis.db import models
 from django.db.models.functions import Concat
@@ -17,16 +13,15 @@ logger = logging.getLogger(__name__)
 # default manager for AdminBoundary, doesn't load geometries
 class NoGeometryManager(models.GeoManager):
     def get_queryset(self):
-        return super(NoGeometryManager, self).get_queryset().defer('geometry', 'simplified_geometry')
+        return super().get_queryset().defer('geometry', 'simplified_geometry')
 
 
 # optional 'geometries' manager for AdminBoundary, loads everything
 class GeometryManager(models.GeoManager):
     def get_queryset(self):
-        return super(GeometryManager, self).get_queryset()
+        return super().get_queryset()
 
 
-@six.python_2_unicode_compatible
 class AdminBoundary(MPTTModel, models.Model):
     """
     Represents a single administrative boundary (like a country, state or district)

@@ -1,6 +1,3 @@
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import, division, print_function, unicode_literals
-
 import inspect
 import json
 import os
@@ -9,7 +6,6 @@ import regex
 import redis
 import shutil
 import string
-import six
 import time
 
 from datetime import datetime, timedelta
@@ -32,7 +28,7 @@ from temba.contacts.models import Contact, ContactGroup, ContactField, URN
 from temba.orgs.models import Org
 from temba.channels.models import Channel
 from temba.locations.models import AdminBoundary
-from temba.flows.models import Flow, ActionSet, RuleSet, FlowStep, FlowRevision, clear_flow_users
+from temba.flows.models import Flow, ActionSet, RuleSet, FlowRevision, clear_flow_users
 from temba.msgs.models import Msg, INCOMING
 from temba.utils import dict_to_struct, get_anonymous_user
 from temba.values.constants import Value
@@ -51,11 +47,11 @@ class TembaTestRunner(DiscoverRunner):
     def __init__(self, *args, **kwargs):
         settings.TESTING = True
 
-        super(TembaTestRunner, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
         mock_server.start()
 
     def build_suite(self, *args, **kwargs):
-        suite = super(TembaTestRunner, self).build_suite(*args, **kwargs)
+        suite = super().build_suite(*args, **kwargs)
         excluded = getattr(settings, 'TEST_EXCLUDE', [])
         if not getattr(settings, 'RUN_ALL_TESTS', False):
             tests = []
@@ -68,7 +64,7 @@ class TembaTestRunner(DiscoverRunner):
 
     def run_suite(self, suite, **kwargs):
 
-        return super(TembaTestRunner, self).run_suite(suite, **kwargs)
+        return super().run_suite(suite, **kwargs)
 
 
 def add_testing_flag_to_context(*args):
@@ -97,18 +93,18 @@ class AddFlowServerTestsMeta(type):
     engine, and a new one called test_foo_flowserver with is run using the flowserver.
     """
     def __new__(mcs, name, bases, dct):
-        if settings.FLOW_SERVER_URL:
-            new_tests = {}
-            for key, test_func in six.iteritems(dct):
-                if key.startswith('test_') and getattr(test_func, '_also_in_flowserver', False):
-                    test_without, test_with = mcs._split_test(test_func)
+        new_tests = {}
+        for key, test_func in dct.items():
+            if key.startswith('test_') and getattr(test_func, '_also_in_flowserver', False):
+                test_without, test_with = mcs._split_test(test_func)
 
-                    new_tests[key] = test_without
+                new_tests[key] = test_without
+                if settings.FLOW_SERVER_URL:
                     new_tests[key + '_flowserver'] = test_with
 
-            dct.update(new_tests)
+        dct.update(new_tests)
 
-        return super(AddFlowServerTestsMeta, mcs).__new__(mcs, name, bases, dct)
+        return super().__new__(mcs, name, bases, dct)
 
     @staticmethod
     def _split_test(test_func):
@@ -184,7 +180,7 @@ class TembaTestMixin(object):
         handle.close()
 
         if substitutions:
-            for k, v in six.iteritems(substitutions):
+            for k, v in substitutions.items():
                 print('Replacing "%s" with "%s"' % (k, v))
                 data = data.replace(k, str(v))
 
@@ -366,10 +362,10 @@ class TembaTestMixin(object):
     def update_destination_no_check(self, flow, node, destination, rule=None):  # pragma: no cover
         """ Update the destination without doing a cycle check """
         # look up our destination, we need this in order to set the correct destination_type
-        destination_type = FlowStep.TYPE_ACTION_SET
+        destination_type = Flow.NODE_TYPE_ACTIONSET
         action_destination = Flow.get_node(flow, destination, destination_type)
         if not action_destination:
-            destination_type = FlowStep.TYPE_RULE_SET
+            destination_type = Flow.NODE_TYPE_RULESET
             ruleset_destination = Flow.get_node(flow, destination, destination_type)
             self.assertTrue(ruleset_destination, "Unable to find new destination with uuid: %s" % destination)
 
@@ -410,7 +406,7 @@ class TembaTestMixin(object):
             self.assertEqual(mock_request.data, data)
 
         # check any provided header values
-        for key, val in six.iteritems(headers):
+        for key, val in headers.items():
             self.assertEqual(mock_request.headers.get(key.replace('_', '-')), val)
 
     def assertAllRequestsMade(self):
@@ -477,7 +473,7 @@ class TembaTestMixin(object):
         cursor.execute('explain %s' % query)
         plan = cursor.fetchall()
         indexes = []
-        for match in regex.finditer('Index Scan using (.*?) on (.*?) \(cost', six.text_type(plan), regex.DOTALL):
+        for match in regex.finditer('Index Scan using (.*?) on (.*?) \(cost', str(plan), regex.DOTALL):
             index = match.group(1).strip()
             table = match.group(2).strip()
             indexes.append((table, index))
@@ -486,8 +482,7 @@ class TembaTestMixin(object):
         return indexes
 
 
-@six.add_metaclass(AddFlowServerTestsMeta)
-class TembaTest(TembaTestMixin, SmartminTest):
+class TembaTest(TembaTestMixin, SmartminTest, metaclass=AddFlowServerTestsMeta):
     def setUp(self):
         self.maxDiff = 4096
         self.mock_server = mock_server
@@ -511,6 +506,7 @@ class TembaTest(TembaTestMixin, SmartminTest):
         self.editor = self.create_user("Editor")
         self.admin = self.create_user("Administrator")
         self.surveyor = self.create_user("Surveyor")
+        self.customer_support = self.create_user("support", ("Customer Support",))
 
         # setup admin boundaries for Rwanda
         self.country = AdminBoundary.create(osm_id='171496', name='Rwanda', level=0)
@@ -591,7 +587,7 @@ class TembaTest(TembaTestMixin, SmartminTest):
 class FlowFileTest(TembaTest):
 
     def setUp(self):
-        super(FlowFileTest, self).setUp()
+        super().setUp()
         self.contact = self.create_contact('Ben Haggerty', number='+12065552020')
 
     def assertInUserGroups(self, contact, group_names, only=False):
@@ -699,13 +695,13 @@ class BrowserTest(LiveServerTestCase):  # pragma: no cover
         except Exception:
             pass
 
-        super(BrowserTest, cls).setUpClass()
+        super().setUpClass()
 
     @classmethod
     def tearDownClass(cls):
         pass
         # cls.driver.quit()
-        # super(BrowserTest, cls).tearDownClass()
+        # super().tearDownClass()
 
     def strip_tags(self, html):
         s = MLStripper()
@@ -871,7 +867,7 @@ class MigrationTest(TembaTest):
             "TestCase '{}' must define migrate_from and migrate_to properties".format(type(self).__name__)
 
         # set up our temba test
-        super(MigrationTest, self).setUp()
+        super().setUp()
 
         self.migrate_from = [(self.app, self.migrate_from)]
         self.migrate_to = [(self.app, self.migrate_to)]

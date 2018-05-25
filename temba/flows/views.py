@@ -1,10 +1,8 @@
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import, division, print_function, unicode_literals
 
+import iso8601
 import json
 import logging
 import regex
-import six
 import time
 import traceback
 
@@ -46,14 +44,13 @@ from temba.utils.expressions import get_function_listing
 from temba.utils.goflow import get_client
 from temba.utils.views import BaseActionForm
 from uuid import uuid4
-from .models import FlowStep, RuleSet, ActionLog, ExportFlowResultsTask, FlowLabel, FlowPathRecentRun
+from .models import RuleSet, ActionLog, ExportFlowResultsTask, FlowLabel, FlowPathRecentRun
 from .models import FlowUserConflictException, FlowVersionConflictException, FlowInvalidCycleException
 
 logger = logging.getLogger(__name__)
 
 
 EXPIRES_CHOICES = (
-    (0, _('Never')),
     (5, _('After 5 minutes')),
     (10, _('After 10 minutes')),
     (15, _('After 15 minutes')),
@@ -143,7 +140,7 @@ class FlowActionMixin(SmartListView):
 
     @csrf_exempt
     def dispatch(self, *args, **kwargs):
-        return super(FlowActionMixin, self).dispatch(*args, **kwargs)
+        return super().dispatch(*args, **kwargs)
 
     def post(self, request, *args, **kwargs):
         user = self.request.user
@@ -265,7 +262,7 @@ class FlowCRUDL(SmartCRUDL):
 
     class OrgQuerysetMixin(object):
         def derive_queryset(self, *args, **kwargs):
-            queryset = super(FlowCRUDL.OrgQuerysetMixin, self).derive_queryset(*args, **kwargs)
+            queryset = super().derive_queryset(*args, **kwargs)
             if not self.request.user.is_authenticated():  # pragma: needs cover
                 return queryset.exclude(pk__gt=0)
             else:
@@ -284,7 +281,7 @@ class FlowCRUDL(SmartCRUDL):
                                                    (Flow.SURVEY, 'Surveyor')))
 
             def __init__(self, user, branding, *args, **kwargs):
-                super(FlowCRUDL.Create.FlowCreateForm, self).__init__(*args, **kwargs)
+                super().__init__(*args, **kwargs)
                 self.user = user
 
                 org_languages = self.user.get_org().languages.all().order_by('orgs', 'name')
@@ -322,13 +319,13 @@ class FlowCRUDL(SmartCRUDL):
             return exclude
 
         def get_form_kwargs(self):
-            kwargs = super(FlowCRUDL.Create, self).get_form_kwargs()
+            kwargs = super().get_form_kwargs()
             kwargs['user'] = self.request.user
             kwargs['branding'] = self.request.branding
             return kwargs
 
         def get_context_data(self, **kwargs):
-            context = super(FlowCRUDL.Create, self).get_context_data(**kwargs)
+            context = super().get_context_data(**kwargs)
             context['has_flows'] = Flow.objects.filter(org=self.request.user.get_org(), is_active=True).count() > 0
             return context
 
@@ -412,7 +409,7 @@ class FlowCRUDL(SmartCRUDL):
                                                       choices=EXPIRES_CHOICES)
 
             def __init__(self, user, *args, **kwargs):
-                super(FlowCRUDL.Update.FlowUpdateForm, self).__init__(*args, **kwargs)
+                super().__init__(*args, **kwargs)
                 self.user = user
 
                 metadata = self.instance.metadata
@@ -474,12 +471,12 @@ class FlowCRUDL(SmartCRUDL):
             return fields
 
         def get_form_kwargs(self):
-            kwargs = super(FlowCRUDL.Update, self).get_form_kwargs()
+            kwargs = super().get_form_kwargs()
             kwargs['user'] = self.request.user
             return kwargs
 
         def pre_save(self, obj):
-            obj = super(FlowCRUDL.Update, self).pre_save(obj)
+            obj = super().pre_save(obj)
             metadata = obj.metadata
 
             if Flow.CONTACT_CREATION in self.form.cleaned_data:
@@ -536,7 +533,7 @@ class FlowCRUDL(SmartCRUDL):
 
     class UploadMediaAction(OrgPermsMixin, SmartUpdateView):
         def post(self, request, *args, **kwargs):
-            generated_uuid = six.text_type(uuid4())
+            generated_uuid = str(uuid4())
             path = self.save_media_upload(self.request.FILES['file'], self.request.POST.get('actionset'),
                                           generated_uuid)
             return JsonResponse(dict(path=path))
@@ -556,7 +553,7 @@ class FlowCRUDL(SmartCRUDL):
         search_fields = ('name__icontains',)
 
         def get_context_data(self, **kwargs):
-            context = super(FlowCRUDL.BaseList, self).get_context_data(**kwargs)
+            context = super().get_context_data(**kwargs)
             context['org_has_flows'] = Flow.objects.filter(org=self.request.user.get_org(), is_active=True).count()
             context['folders'] = self.get_folders()
             context['labels'] = self.get_flow_labels()
@@ -571,7 +568,7 @@ class FlowCRUDL(SmartCRUDL):
             return context
 
         def derive_queryset(self, *args, **kwargs):
-            qs = super(FlowCRUDL.BaseList, self).derive_queryset(*args, **kwargs)
+            qs = super().derive_queryset(*args, **kwargs)
             return qs.exclude(flow_type=Flow.MESSAGE).exclude(is_active=False)
 
         def get_campaigns(self):
@@ -606,14 +603,14 @@ class FlowCRUDL(SmartCRUDL):
         default_order = ('-created_on',)
 
         def derive_queryset(self, *args, **kwargs):
-            return super(FlowCRUDL.Archived, self).derive_queryset(*args, **kwargs).filter(is_active=True, is_archived=True)
+            return super().derive_queryset(*args, **kwargs).filter(is_active=True, is_archived=True)
 
     class List(BaseList):
         title = _("Flows")
         actions = ('archive', 'label')
 
         def derive_queryset(self, *args, **kwargs):
-            queryset = super(FlowCRUDL.List, self).derive_queryset(*args, **kwargs)
+            queryset = super().derive_queryset(*args, **kwargs)
             queryset = queryset.filter(is_active=True, is_archived=False)
             types = self.request.GET.getlist('flow_type')
             if types:
@@ -648,7 +645,7 @@ class FlowCRUDL(SmartCRUDL):
             return flows
 
         def get_context_data(self, *args, **kwargs):
-            context = super(FlowCRUDL.Campaign, self).get_context_data(*args, **kwargs)
+            context = super().get_context_data(*args, **kwargs)
             context['current_campaign'] = self.get_campaign()
             return context
 
@@ -670,7 +667,7 @@ class FlowCRUDL(SmartCRUDL):
             return links
 
         def get_context_data(self, *args, **kwargs):
-            context = super(FlowCRUDL.Filter, self).get_context_data(*args, **kwargs)
+            context = super().get_context_data(*args, **kwargs)
             context['current_label'] = self.derive_label()
             return context
 
@@ -693,7 +690,7 @@ class FlowCRUDL(SmartCRUDL):
                 return [label]
 
         def get_queryset(self, **kwargs):
-            qs = super(FlowCRUDL.Filter, self).get_queryset(**kwargs)
+            qs = super().get_queryset(**kwargs)
             qs = qs.filter(org=self.request.user.get_org()).order_by('-created_on')
             qs = qs.filter(labels__in=self.get_label_filter(), is_archived=False).distinct()
 
@@ -705,19 +702,19 @@ class FlowCRUDL(SmartCRUDL):
             org = self.request.user.get_org()
 
             contact_variables = [
-                dict(name='contact', display=six.text_type(_('Contact Name'))),
-                dict(name='contact.first_name', display=six.text_type(_('Contact First Name'))),
-                dict(name='contact.groups', display=six.text_type(_('Contact Groups'))),
-                dict(name='contact.language', display=six.text_type(_('Contact Language'))),
-                dict(name='contact.mailto', display=six.text_type(_('Contact Email Address'))),
-                dict(name='contact.name', display=six.text_type(_('Contact Name'))),
-                dict(name='contact.tel', display=six.text_type(_('Contact Phone'))),
-                dict(name='contact.tel_e164', display=six.text_type(_('Contact Phone - E164'))),
-                dict(name='contact.uuid', display=six.text_type(_("Contact UUID"))),
-                dict(name='new_contact', display=six.text_type(_('New Contact')))
+                dict(name='contact', display=str(_('Contact Name'))),
+                dict(name='contact.first_name', display=str(_('Contact First Name'))),
+                dict(name='contact.groups', display=str(_('Contact Groups'))),
+                dict(name='contact.language', display=str(_('Contact Language'))),
+                dict(name='contact.mailto', display=str(_('Contact Email Address'))),
+                dict(name='contact.name', display=str(_('Contact Name'))),
+                dict(name='contact.tel', display=str(_('Contact Phone'))),
+                dict(name='contact.tel_e164', display=str(_('Contact Phone - E164'))),
+                dict(name='contact.uuid', display=str(_("Contact UUID"))),
+                dict(name='new_contact', display=str(_('New Contact')))
             ]
 
-            contact_variables += [dict(name="contact.%s" % scheme, display=six.text_type(_("Contact %s" % label)))
+            contact_variables += [dict(name="contact.%s" % scheme, display=str(_("Contact %s" % label)))
                                   for scheme, label in ContactURN.SCHEME_CHOICES if scheme != TEL_SCHEME and scheme in
                                   org.get_schemes(Channel.ROLE_SEND)]
 
@@ -725,20 +722,20 @@ class FlowCRUDL(SmartCRUDL):
                                   ContactField.objects.filter(org=org, is_active=True)]
 
             date_variables = [
-                dict(name='date', display=six.text_type(_('Current Date and Time'))),
-                dict(name='date.now', display=six.text_type(_('Current Date and Time'))),
-                dict(name='date.today', display=six.text_type(_('Current Date'))),
-                dict(name='date.tomorrow', display=six.text_type(_("Tomorrow's Date"))),
-                dict(name='date.yesterday', display=six.text_type(_("Yesterday's Date")))
+                dict(name='date', display=str(_('Current Date and Time'))),
+                dict(name='date.now', display=str(_('Current Date and Time'))),
+                dict(name='date.today', display=str(_('Current Date'))),
+                dict(name='date.tomorrow', display=str(_("Tomorrow's Date"))),
+                dict(name='date.yesterday', display=str(_("Yesterday's Date")))
             ]
 
             flow_variables = [
-                dict(name='channel', display=six.text_type(_('Sent to'))),
-                dict(name='channel.name', display=six.text_type(_('Sent to'))),
-                dict(name='channel.tel', display=six.text_type(_('Sent to'))),
-                dict(name='channel.tel_e164', display=six.text_type(_('Sent to'))),
-                dict(name='step', display=six.text_type(_('Sent to'))),
-                dict(name='step.value', display=six.text_type(_('Sent to')))
+                dict(name='channel', display=str(_('Sent to'))),
+                dict(name='channel.name', display=str(_('Sent to'))),
+                dict(name='channel.tel', display=str(_('Sent to'))),
+                dict(name='channel.tel_e164', display=str(_('Sent to'))),
+                dict(name='step', display=str(_('Sent to'))),
+                dict(name='step.value', display=str(_('Sent to')))
             ]
 
             parent_variables = [dict(name='parent.%s' % v['name'], display=v['display']) for v in contact_variables]
@@ -747,7 +744,7 @@ class FlowCRUDL(SmartCRUDL):
             child_variables = [dict(name='child.%s' % v['name'], display=v['display']) for v in contact_variables]
             child_variables += [dict(name='child.%s' % v['name'], display=v['display']) for v in flow_variables]
 
-            flow_variables.append(dict(name='flow', display=six.text_type(_('All flow variables'))))
+            flow_variables.append(dict(name='flow', display=str(_('All flow variables'))))
 
             flow_id = self.request.GET.get('flow', None)
 
@@ -777,7 +774,7 @@ class FlowCRUDL(SmartCRUDL):
             return "flows/flow_editor.haml"
 
         def get_context_data(self, *args, **kwargs):
-            context = super(FlowCRUDL.Editor, self).get_context_data(*args, **kwargs)
+            context = super().get_context_data(*args, **kwargs)
 
             flow = self.get_object(self.get_queryset())
             org = self.request.user.get_org()
@@ -845,7 +842,7 @@ class FlowCRUDL(SmartCRUDL):
             return "flows/flow_editor_next.haml"
 
         def get_context_data(self, *args, **kwargs):
-            context = super(FlowCRUDL.EditorNext, self).get_context_data(*args, **kwargs)
+            context = super().get_context_data(*args, **kwargs)
             context['fingerprint'] = datetime_to_ms(datetime.now())
             return context
 
@@ -871,14 +868,14 @@ class FlowCRUDL(SmartCRUDL):
                                                           "only their most recent runs"))
 
             def __init__(self, user, *args, **kwargs):
-                super(FlowCRUDL.ExportResults.ExportForm, self).__init__(*args, **kwargs)
+                super().__init__(*args, **kwargs)
                 self.user = user
                 self.fields['contact_fields'].queryset = ContactField.objects.filter(org=self.user.get_org(),
                                                                                      is_active=True)
                 self.fields['flows'].queryset = Flow.objects.filter(org=self.user.get_org(), is_active=True)
 
             def clean(self):
-                cleaned_data = super(FlowCRUDL.ExportResults.ExportForm, self).clean()
+                cleaned_data = super().clean()
 
                 if 'contact_fields' in cleaned_data and len(cleaned_data['contact_fields']) > 10:  # pragma: needs cover
                     raise forms.ValidationError(_("You can only include up to 10 contact fields in your export"))
@@ -890,7 +887,7 @@ class FlowCRUDL(SmartCRUDL):
         success_url = '@flows.flow_list'
 
         def get_form_kwargs(self):
-            kwargs = super(FlowCRUDL.ExportResults, self).get_form_kwargs()
+            kwargs = super().get_form_kwargs()
             kwargs['user'] = self.request.user
             return kwargs
 
@@ -967,7 +964,7 @@ class FlowCRUDL(SmartCRUDL):
         def get_context_data(self, *args, **kwargs):
 
             total_responses = 0
-            context = super(FlowCRUDL.ActivityChart, self).get_context_data(*args, **kwargs)
+            context = super().get_context_data(*args, **kwargs)
 
             flow = self.get_object()
             from temba.flows.models import FlowPathCount
@@ -1055,7 +1052,7 @@ class FlowCRUDL(SmartCRUDL):
         paginate_by = 50
 
         def get_context_data(self, *args, **kwargs):
-            context = super(FlowCRUDL.RunTable, self).get_context_data(*args, **kwargs)
+            context = super().get_context_data(*args, **kwargs)
             flow = self.get_object()
             org = self.derive_org()
 
@@ -1081,8 +1078,7 @@ class FlowCRUDL(SmartCRUDL):
             if modified_on:
                 id = self.request.GET['id']
 
-                from temba.utils import json_date_to_datetime
-                modified_on = json_date_to_datetime(modified_on)
+                modified_on = iso8601.parse_date(modified_on)
                 runs = runs.filter(modified_on__lte=modified_on).exclude(id__gte=id)
 
             # we grab one more than our page to denote whether there's more to get
@@ -1127,7 +1123,7 @@ class FlowCRUDL(SmartCRUDL):
             return links
 
         def get_context_data(self, *args, **kwargs):
-            context = super(FlowCRUDL.Results, self).get_context_data(*args, **kwargs)
+            context = super().get_context_data(*args, **kwargs)
             flow = self.get_object()
             context['rulesets'] = list(flow.rule_sets.filter(ruleset_type__in=RuleSet.TYPE_WAIT).order_by('y'))
             for ruleset in context['rulesets']:
@@ -1149,7 +1145,7 @@ class FlowCRUDL(SmartCRUDL):
 
         @csrf_exempt
         def dispatch(self, *args, **kwargs):
-            return super(FlowCRUDL.Simulate, self).dispatch(*args, **kwargs)
+            return super().dispatch(*args, **kwargs)
 
         def get(self, request, *args, **kwargs):
             return HttpResponseRedirect(reverse('flows.flow_editor', args=[self.get_object().uuid]))
@@ -1219,7 +1215,6 @@ class FlowCRUDL(SmartCRUDL):
 
                 # delete all our steps and messages to restart the simulation
                 runs = FlowRun.objects.filter(contact=test_contact).order_by('-modified_on')
-                steps = FlowStep.objects.filter(run__in=runs)
 
                 # if their last simulation was more than a day ago, log this simulation
                 if runs and runs.first().created_on < timezone.now() - timedelta(hours=24):  # pragma: needs cover
@@ -1235,12 +1230,7 @@ class FlowCRUDL(SmartCRUDL):
 
                 IVRCall.objects.filter(contact=test_contact).delete()
                 USSDSession.objects.filter(contact=test_contact).delete()
-
-                steps.delete()
                 FlowRun.objects.filter(contact=test_contact).delete()
-
-                # reset all contact fields values
-                test_contact.values.all().delete()
 
                 # reset the name for our test contact too
                 test_contact.fields = {}
@@ -1286,7 +1276,7 @@ class FlowCRUDL(SmartCRUDL):
                                                     status=status)
                     else:
                         Msg.create_incoming(None,
-                                            six.text_type(test_contact.get_urn(TEL_SCHEME)),
+                                            str(test_contact.get_urn(TEL_SCHEME)),
                                             new_message,
                                             attachments=[media] if media else None,
                                             org=user.get_org(),
@@ -1321,9 +1311,9 @@ class FlowCRUDL(SmartCRUDL):
             response = dict(messages=messages_json, activity=active, visited=visited)
 
             # if we are at a ruleset, include it's details
-            step = FlowStep.objects.filter(contact=test_contact, left_on=None).order_by('-arrived_on').first()
-            if step:
-                ruleset = RuleSet.objects.filter(uuid=step.step_uuid).first()
+            run = FlowRun.get_active_for_contact(test_contact).first()
+            if run and run.path:
+                ruleset = RuleSet.objects.filter(uuid=run.path[-1][FlowRun.PATH_NODE_UUID]).first()
                 if ruleset:
                     response['ruleset'] = ruleset.as_json()
 
@@ -1397,7 +1387,7 @@ class FlowCRUDL(SmartCRUDL):
                 self.user = kwargs.pop('user')
                 self.flow = kwargs.pop('flow')
 
-                super(FlowCRUDL.Broadcast.BroadcastForm, self).__init__(*args, **kwargs)
+                super().__init__(*args, **kwargs)
                 self.fields['omnibox'].set_user(self.user)
 
             omnibox = OmniboxField(label=_("Contacts & Groups"),
@@ -1417,7 +1407,7 @@ class FlowCRUDL(SmartCRUDL):
                 return starting
 
             def clean(self):
-                cleaned = super(FlowCRUDL.Broadcast.BroadcastForm, self).clean()
+                cleaned = super().clean()
 
                 # check whether there are any flow starts that are incomplete
                 if self.flow.is_starting():
@@ -1439,7 +1429,7 @@ class FlowCRUDL(SmartCRUDL):
         success_url = 'uuid@flows.flow_editor'
 
         def get_context_data(self, *args, **kwargs):
-            context = super(FlowCRUDL.Broadcast, self).get_context_data(*args, **kwargs)
+            context = super().get_context_data(*args, **kwargs)
 
             run_stats = self.object.get_run_stats()
             context['run_count'] = run_stats['total']
@@ -1447,7 +1437,7 @@ class FlowCRUDL(SmartCRUDL):
             return context
 
         def get_form_kwargs(self):
-            kwargs = super(FlowCRUDL.Broadcast, self).get_form_kwargs()
+            kwargs = super().get_form_kwargs()
             kwargs['user'] = self.request.user
             kwargs['flow'] = self.object
             return kwargs
@@ -1525,7 +1515,7 @@ class FlowCRUDL(SmartCRUDL):
                 if len(authorization) == 2 and authorization[0] == 'Token' and authorization[1] == settings.FLOW_SERVER_AUTH_TOKEN:
                     return True
 
-            return super(FlowCRUDL.Assets, self).has_permission(request, *args, **kwargs)
+            return super().has_permission(request, *args, **kwargs)
 
         def get(self, *args, **kwargs):
             org = self.derive_org()
@@ -1536,6 +1526,9 @@ class FlowCRUDL(SmartCRUDL):
             resource = self.resources[resource_type]
             if uuid:
                 result = resource.get_item(org, uuid)
+
+                if result is None:
+                    return JsonResponse({'error': f"no such {resource_type} with UUID '{uuid}'"}, status=400)
             else:
                 result = resource.get_root(org)
 
@@ -1570,7 +1563,7 @@ class PreprocessTest(FormView):  # pragma: no cover
 
     @csrf_exempt
     def dispatch(self, *args, **kwargs):
-        return super(PreprocessTest, self).dispatch(*args, **kwargs)
+        return super().dispatch(*args, **kwargs)
 
     def post(self, request, *args, **kwargs):
         return HttpResponse(json.dumps(dict(text='Norbert', extra=dict(occupation='hoopster', skillz=7.9))),
@@ -1591,7 +1584,7 @@ class FlowLabelForm(forms.ModelForm):
             label = kwargs['label']
             del kwargs['label']
 
-        super(FlowLabelForm, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
         qs = FlowLabel.objects.filter(org=self.org, parent=None)
 
         if label:
@@ -1625,7 +1618,7 @@ class FlowLabelCRUDL(SmartCRUDL):
         success_message = ''
 
         def get_form_kwargs(self):
-            kwargs = super(FlowLabelCRUDL.Update, self).get_form_kwargs()
+            kwargs = super().get_form_kwargs()
             kwargs['org'] = self.request.user.get_org()
             kwargs['label'] = self.get_object()
             return kwargs
@@ -1641,17 +1634,17 @@ class FlowLabelCRUDL(SmartCRUDL):
         submit_button_name = _("Create")
 
         def get_form_kwargs(self):
-            kwargs = super(FlowLabelCRUDL.Create, self).get_form_kwargs()
+            kwargs = super().get_form_kwargs()
             kwargs['org'] = self.request.user.get_org()
             return kwargs
 
         def pre_save(self, obj, *args, **kwargs):
-            obj = super(FlowLabelCRUDL.Create, self).pre_save(obj, *args, **kwargs)
+            obj = super().pre_save(obj, *args, **kwargs)
             obj.org = self.request.user.get_org()
             return obj
 
         def post_save(self, obj, *args, **kwargs):
-            obj = super(FlowLabelCRUDL.Create, self).post_save(obj, *args, **kwargs)
+            obj = super().post_save(obj, *args, **kwargs)
 
             flow_ids = []
             if self.form.cleaned_data['flows']:  # pragma: needs cover

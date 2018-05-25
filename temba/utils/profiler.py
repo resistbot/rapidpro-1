@@ -1,8 +1,4 @@
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import, division, print_function, unicode_literals
-
 import logging
-import six
 import django
 import textwrap
 import traceback
@@ -13,7 +9,6 @@ from django.db.backends.utils import CursorWrapper
 logger = logging.getLogger(__name__)
 
 
-@six.python_2_unicode_compatible
 class QueryTracker(object):  # pragma: no cover
 
     def print_stack(self, stack):
@@ -56,7 +51,7 @@ class QueryTracker(object):  # pragma: no cover
                 return True
 
             def execute(self, sql, params=None):
-                results = super(CursorTrackerWrapper, self).execute(sql, params)
+                results = super().execute(sql, params)
                 sql = self.db.ops.last_executed_query(self.cursor, sql, params)
                 if query_contains and query_contains not in sql:
                     return results
@@ -67,7 +62,7 @@ class QueryTracker(object):  # pragma: no cover
                 return results
 
             def executemany(self, sql, param_list):
-                return super(CursorTrackerWrapper, self).executemany(sql, param_list)
+                return super().executemany(sql, param_list)
 
         django.db.backends.utils.CursorWrapper = CursorTrackerWrapper
         django.db.backends.utils.CursorDebugWrapper = CursorTrackerWrapper
