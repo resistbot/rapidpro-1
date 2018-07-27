@@ -1,3 +1,4 @@
+import base64
 import json
 from datetime import datetime
 from urllib.parse import quote_plus
@@ -259,10 +260,19 @@ class APITest(TembaTest):
     def test_authentication(self):
         def api_request(endpoint, token):
             return self.client.get(
-                endpoint + ".json",
+                f"{endpoint}.json",
                 content_type="application/json",
                 HTTP_X_FORWARDED_HTTPS="https",
-                HTTP_AUTHORIZATION="Token %s" % token,
+                HTTP_AUTHORIZATION=f"Token {token}",
+            )
+
+        def api_request_basic_auth(endpoint, username, token):
+            credentials_base64 = base64.encodebytes(f"{username}:{token}".encode()).decode()
+            return self.client.get(
+                f"{endpoint}.json",
+                content_type="application/json",
+                HTTP_X_FORWARDED_HTTPS="https",
+                HTTP_AUTHORIZATION=f"Basic {credentials_base64}",
             )
 
         contacts_url = reverse("api.v2.contacts")
@@ -272,19 +282,36 @@ class APITest(TembaTest):
         response = api_request(contacts_url, "1234567890")
         self.assertResponseError(response, None, "Invalid token", status_code=403)
 
+        # can't fetch endpoint with invalid token
+        response = api_request_basic_auth(contacts_url, self.admin.username, "1234567890")
+        self.assertResponseError(response, None, "Invalid token or email", status_code=403)
+
         token1 = APIToken.get_or_create(self.org, self.admin, Group.objects.get(name="Administrators"))
         token2 = APIToken.get_or_create(self.org, self.admin, Group.objects.get(name="Surveyors"))
 
+        # can't fetch endpoint with invalid username
+        response = api_request_basic_auth(contacts_url, "some@name.com", token1.key)
+        self.assertResponseError(response, None, "Invalid token or email", status_code=403)
+
         # can fetch campaigns endpoint with valid admin token
         response = api_request(campaigns_url, token1.key)
+        self.assertEqual(response.status_code, 200)
+
+        response = api_request_basic_auth(campaigns_url, self.admin.username, token1.key)
         self.assertEqual(response.status_code, 200)
 
         # but not with surveyor token
         response = api_request(campaigns_url, token2.key)
         self.assertResponseError(response, None, "You do not have permission to perform this action.", status_code=403)
 
+        response = api_request_basic_auth(campaigns_url, self.admin.username, token2.key)
+        self.assertResponseError(response, None, "You do not have permission to perform this action.", status_code=403)
+
         # but it can be used to access the contacts endpoint
         response = api_request(contacts_url, token2.key)
+        self.assertEqual(response.status_code, 200)
+
+        response = api_request_basic_auth(contacts_url, self.admin.username, token2.key)
         self.assertEqual(response.status_code, 200)
 
         # if user loses access to the token's role, don't allow the request
@@ -292,14 +319,19 @@ class APITest(TembaTest):
         self.org.surveyors.add(self.admin)
 
         self.assertEqual(api_request(campaigns_url, token1.key).status_code, 403)
+        self.assertEqual(api_request_basic_auth(campaigns_url, self.admin.username, token1.key).status_code, 403)
         self.assertEqual(api_request(contacts_url, token2.key).status_code, 200)  # other token unaffected
+        self.assertEqual(api_request_basic_auth(contacts_url, self.admin.username, token2.key).status_code, 200)
 
         # and if user is inactive, disallow the request
         self.admin.is_active = False
         self.admin.save()
 
         response = api_request(contacts_url, token2.key)
-        self.assertResponseError(response, None, "User inactive or deleted", status_code=403)
+        self.assertResponseError(response, None, "Invalid token", status_code=403)
+
+        response = api_request_basic_auth(contacts_url, self.admin.username, token2.key)
+        self.assertResponseError(response, None, "Invalid token or email", status_code=403)
 
     @override_settings(SECURE_PROXY_SSL_HEADER=("HTTP_X_FORWARDED_HTTPS", "https"))
     def test_root(self):
@@ -549,13 +581,19 @@ class APITest(TembaTest):
 
         reporters = self.create_group("Reporters", [self.joe, self.frank])
 
-        bcast1 = Broadcast.create(self.org, self.admin, "Hello 1", [self.frank.get_urn("twitter")])
-        bcast2 = Broadcast.create(self.org, self.admin, "Hello 2", [self.joe])
-        bcast3 = Broadcast.create(self.org, self.admin, "Hello 3", [self.frank], status="S")
+        bcast1 = Broadcast.create(self.org, self.admin, "Hello 1", urns=[self.frank.get_urn("twitter")])
+        bcast2 = Broadcast.create(self.org, self.admin, "Hello 2", contacts=[self.joe])
+        bcast3 = Broadcast.create(self.org, self.admin, "Hello 3", contacts=[self.frank], status="S")
         bcast4 = Broadcast.create(
-            self.org, self.admin, "Hello 4", [self.frank.get_urn("twitter"), self.joe, reporters], status="F"
+            self.org,
+            self.admin,
+            "Hello 4",
+            urns=[self.frank.get_urn("twitter")],
+            contacts=[self.joe],
+            groups=[reporters],
+            status="F",
         )
-        Broadcast.create(self.org2, self.admin2, "Different org...", [self.hans])
+        Broadcast.create(self.org2, self.admin2, "Different org...", contacts=[self.hans])
 
         # no filtering
         with self.assertNumQueries(NUM_BASE_REQUEST_QUERIES + 4):
@@ -1109,8 +1147,7 @@ class APITest(TembaTest):
         response = self.deleteJSON(url, "uuid=%s" % event1.uuid)
         self.assertEqual(response.status_code, 204)
 
-        event1.refresh_from_db()
-        self.assertFalse(event1.is_active)
+        self.assertFalse(CampaignEvent.objects.filter(id=event1.id).exists())
 
         # should no longer have any events
         self.assertEqual(1, EventFire.objects.filter(contact=contact, event=event2).count())
@@ -2175,7 +2212,7 @@ class APITest(TembaTest):
         response = self.deleteJSON(url, "uuid=%s" % spammers.uuid)
         self.assert404(response)
 
-        ContactGroup.user_groups.all().delete()
+        self.release(ContactGroup.user_groups.all())
 
         for i in range(ContactGroup.MAX_ORG_CONTACTGROUPS):
             ContactGroup.create_static(self.org2, self.admin2, "group%d" % i)
@@ -2292,9 +2329,8 @@ class APITest(TembaTest):
         response = self.deleteJSON(url, "uuid=%s" % spam.uuid)
         self.assert404(response)
 
-        Label.all_objects.all().delete()
-
-        for i in range(Label.MAX_ORG_LABELS):
+        starting = Label.all_objects.all().count()
+        for i in range(Label.MAX_ORG_LABELS - starting + 1):
             Label.get_or_create(self.org, self.user, "label%d" % i)
 
         response = self.postJSON(url, None, {"name": "Interesting"})
@@ -2473,7 +2509,7 @@ class APITest(TembaTest):
         self.assertResultsById(response, [joe_msg3, frank_msg1])
 
         # filter by broadcast
-        broadcast = Broadcast.create(self.org, self.user, "A beautiful broadcast", [self.joe, self.frank])
+        broadcast = Broadcast.create(self.org, self.user, "A beautiful broadcast", contacts=[self.joe, self.frank])
         broadcast.send()
         response = self.fetchJSON(url, "broadcast=%s" % broadcast.pk)
 
@@ -2697,6 +2733,8 @@ class APITest(TembaTest):
                         "category": "Blue",
                         "node": color_ruleset.uuid,
                         "time": format_datetime(iso8601.parse_date(joe_run1.results["color"]["created_on"])),
+                        "name": "color",
+                        "input": "it is blue",
                     }
                 },
                 "created_on": format_datetime(joe_run1.created_on),

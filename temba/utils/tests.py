@@ -1238,6 +1238,8 @@ class ExportTest(TembaTest):
         self.assertEqual(self.task.prepare_value(None), "")
         self.assertEqual(self.task.prepare_value("=()"), "'=()")  # escape formulas
         self.assertEqual(self.task.prepare_value(123), "123")
+        self.assertEqual(self.task.prepare_value(True), True)
+        self.assertEqual(self.task.prepare_value(False), False)
 
         dt = pytz.timezone("Africa/Nairobi").localize(datetime.datetime(2017, 2, 7, 15, 41, 23, 123456))
         self.assertEqual(self.task.prepare_value(dt), datetime.datetime(2017, 2, 7, 14, 41, 23, 0))
@@ -1275,7 +1277,7 @@ class ExportTest(TembaTest):
         for i in range(16):
             extra_cols.append("Extra Column %d" % i)
 
-        exporter = TableExporter(self.task, "test", "other test", cols, extra_cols)
+        exporter = TableExporter(self.task, "test", cols + extra_cols)
 
         values = []
         for i in range(32):
@@ -1287,47 +1289,31 @@ class ExportTest(TembaTest):
 
         # write out 1050000 rows, that'll make two sheets
         for i in range(test_max_rows + 200):
-            exporter.write_row(values, extra_values)
+            exporter.write_row(values + extra_values)
 
         temp_file, file_ext = exporter.save_file()
         workbook = load_workbook(filename=temp_file.name)
 
-        self.assertEqual(4, len(workbook.worksheets))
+        self.assertEqual(2, len(workbook.worksheets))
 
         # check our sheet 1 values
         sheet1 = workbook.worksheets[0]
 
         rows = tuple(sheet1.rows)
 
-        self.assertEqual(cols, [cell.value for cell in rows[0]])
-        self.assertEqual(values, [cell.value for cell in rows[1]])
+        self.assertEqual(cols + extra_cols, [cell.value for cell in rows[0]])
+        self.assertEqual(values + extra_values, [cell.value for cell in rows[1]])
 
         self.assertEqual(test_max_rows, len(list(sheet1.rows)))
-        self.assertEqual(32, len(list(sheet1.columns)))
+        self.assertEqual(32 + 16, len(list(sheet1.columns)))
 
         sheet2 = workbook.worksheets[1]
         rows = tuple(sheet2.rows)
-        self.assertEqual(extra_cols, [cell.value for cell in rows[0]])
-        self.assertEqual(extra_values, [cell.value for cell in rows[1]])
+        self.assertEqual(cols + extra_cols, [cell.value for cell in rows[0]])
+        self.assertEqual(values + extra_values, [cell.value for cell in rows[1]])
 
-        self.assertEqual(test_max_rows, len(list(sheet2.rows)))
-        self.assertEqual(16, len(list(sheet2.columns)))
-
-        sheet3 = workbook.worksheets[2]
-        rows = tuple(sheet3.rows)
-        self.assertEqual(cols, [cell.value for cell in rows[0]])
-        self.assertEqual(values, [cell.value for cell in rows[1]])
-
-        self.assertEqual(200 + 2, len(list(sheet3.rows)))
-        self.assertEqual(32, len(list(sheet3.columns)))
-
-        sheet4 = workbook.worksheets[3]
-        rows = tuple(sheet4.rows)
-        self.assertEqual(extra_cols, [cell.value for cell in rows[0]])
-        self.assertEqual(extra_values, [cell.value for cell in rows[1]])
-
-        self.assertEqual(200 + 2, len(list(sheet4.rows)))
-        self.assertEqual(16, len(list(sheet4.columns)))
+        self.assertEqual(200 + 2, len(list(sheet2.rows)))
+        self.assertEqual(32 + 16, len(list(sheet2.columns)))
 
         os.unlink(temp_file.name)
 
@@ -1984,6 +1970,12 @@ class MatchersTest(TembaTest):
         self.assertEqual("85ecbe45-e2df-4785-8fc8-16fa941e0a79", matchers.UUID4String())
         self.assertNotEqual(None, matchers.UUID4String())
         self.assertNotEqual("abc", matchers.UUID4String())
+
+    def test_dict(self):
+        self.assertEqual({}, matchers.Dict())
+        self.assertEqual({"a": "b"}, matchers.Dict())
+        self.assertNotEqual(None, matchers.Dict())
+        self.assertNotEqual([], matchers.Dict())
 
 
 class NonBlockingLockTest(TestCase):

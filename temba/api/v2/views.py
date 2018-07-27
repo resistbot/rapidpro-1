@@ -2382,6 +2382,7 @@ class MessagesEndpoint(ListAPIMixin, BaseAPIView):
      * **labels** - any labels set on this message (array of objects), filterable as `label` with label name or UUID.
      * **created_on** - when this message was either received by the channel or created (datetime) (filterable as `before` and `after`).
      * **sent_on** - for outgoing messages, when the channel sent the message (null if not yet sent or an incoming message) (datetime).
+     * **modified_on** - when the message was last modified (datetime)
 
     You can also filter by `folder` where folder is one of `inbox`, `flows`, `archived`, `outbox`, `incoming`, `failed` or `sent`.
     Note that you cannot filter by more than one of `contact`, `folder`, `label` or `broadcast` at the same time.
@@ -2416,7 +2417,8 @@ class MessagesEndpoint(ListAPIMixin, BaseAPIView):
                 "media": "wav:http://domain.com/recording.wav",
                 "labels": [{"name": "Important", "uuid": "5a4eb79e-1b1f-4ae3-8700-09384cca385f"}],
                 "created_on": "2016-01-06T15:33:00.813162Z",
-                "sent_on": "2016-01-06T15:35:03.675716Z"
+                "sent_on": "2016-01-06T15:35:03.675716Z",
+                "modified_on": "2016-01-06T15:35:03.675716Z"
             },
             ...
         }
@@ -2998,13 +3000,17 @@ class RunsEndpoint(ListAPIMixin, BaseAPIView):
                         "value": "blue",
                         "category": "Blue",
                         "node": "fc32aeb0-ac3e-42a8-9ea7-10248fdf52a1",
-                        "time": "2015-11-11T13:03:51.635662Z"
+                        "time": "2015-11-11T13:03:51.635662Z",
+                        "name": "color",
+                        "input": "it is blue",
                     },
                     "reason": {
                         "value": "Because it's the color of sky",
                         "category": "All Responses",
                         "node": "4c9cb68d-474f-4b9a-b65e-c2aa593a3466",
-                        "time": "2015-11-11T13:05:57.576056Z"
+                        "time": "2015-11-11T13:05:57.576056Z",
+                        "name": "reason",
+                        "input" "Because it's the color of sky",
                     }
                 },
                 "created_on": "2015-11-11T13:05:57.457742Z",

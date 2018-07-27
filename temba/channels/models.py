@@ -91,6 +91,7 @@ class ChannelType(metaclass=ABCMeta):
 
     claim_blurb = None
     claim_view = None
+    claim_view_kwargs = None
 
     configuration_blurb = None
     configuration_urls = None
@@ -105,6 +106,10 @@ class ChannelType(metaclass=ABCMeta):
     quick_reply_text_size = 20
 
     ivr_protocol = None
+
+    # Whether this channel should be activated in the a celery task, useful to turn off if there's a chance for errors
+    #  during activation. Channels should make sure their claim view is non-atomic if a callback will be involved
+    async_activation = True
 
     def is_available_to(self, user):
         """
@@ -158,7 +163,9 @@ class ChannelType(metaclass=ABCMeta):
         """
         Gets the URL/view configuration for this channel types's claim page
         """
-        return url(r"^claim$", self.claim_view.as_view(channel_type=self), name="claim")
+        claim_view_kwargs = self.claim_view_kwargs if self.claim_view_kwargs else {}
+        claim_view_kwargs["channel_type"] = self
+        return url(r"^claim$", self.claim_view.as_view(**claim_view_kwargs), name="claim")
 
     def get_update_form(self):
         if self.update_form is None:
@@ -548,7 +555,16 @@ class Channel(TembaModel):
             org.normalize_contact_tels()
 
         if settings.IS_PROD:
-            on_transaction_commit(lambda: channel_type.activate(channel))
+            if channel_type.async_activation:
+                on_transaction_commit(lambda: channel_type.activate(channel))
+            else:
+                try:
+                    channel_type.activate(channel)
+
+                except Exception as e:
+                    # release our channel, raise error upwards
+                    channel.release()
+                    raise e
 
         return channel
 
@@ -665,19 +681,6 @@ class Channel(TembaModel):
             role=Channel.ROLE_CALL,
             parent=channel,
         )
-
-    @classmethod
-    def refresh_all_jiochat_access_token(cls, channel_id=None):
-        from temba.utils.jiochat import JiochatClient
-
-        jiochat_channels = Channel.objects.filter(channel_type="JC", is_active=True)
-        if channel_id:
-            jiochat_channels = jiochat_channels.filter(id=channel_id)
-
-        for channel in jiochat_channels:
-            client = JiochatClient.from_channel(channel)
-            if client is not None:
-                client.refresh_access_token(channel.id)
 
     @classmethod
     def get_or_create_android(cls, registration_data, status):
@@ -1097,6 +1100,7 @@ class Channel(TembaModel):
             try:
                 # if channel is a new style type, deactivate it
                 channel_type.deactivate(self)
+
             except TwilioRestException as e:
                 raise e
 
@@ -1140,6 +1144,15 @@ class Channel(TembaModel):
         from temba.triggers.models import Trigger
 
         Trigger.objects.filter(channel=self, org=org).update(is_active=False)
+
+        # any transfer associated with us go away
+        self.airtime_transfers.all().delete()
+
+        # and any triggers associated with our channel get archived
+        for trigger in Trigger.objects.filter(org=self.org, channel=self).all():
+            trigger.channel = None
+            trigger.save(update_fields=("channel",))
+            trigger.archive(self.modified_by)
 
     def trigger_sync(self, registration_id=None):  # pragma: no cover
         """
@@ -1273,7 +1286,7 @@ class Channel(TembaModel):
         """
         We want all messages that are:
             1. Pending, ie, never queued
-            2. Queued over two hours ago (something went awry and we need to re-queue)
+            2. Queued over twelve hours ago (something went awry and we need to re-queue)
             3. Errored and are ready for a retry
         """
         from temba.msgs.models import Msg, PENDING, QUEUED, ERRORED, OUTGOING
@@ -1600,7 +1613,10 @@ class ChannelEvent(models.Model):
         Org, on_delete=models.PROTECT, verbose_name=_("Org"), help_text=_("The org this event is connected to")
     )
     channel = models.ForeignKey(
-        Channel, verbose_name=_("Channel"), help_text=_("The channel on which this event took place")
+        Channel,
+        on_delete=models.PROTECT,
+        verbose_name=_("Channel"),
+        help_text=_("The channel on which this event took place"),
     )
     event_type = models.CharField(
         max_length=16, choices=TYPE_CHOICES, verbose_name=_("Event Type"), help_text=_("The type of event")
@@ -1845,7 +1861,7 @@ class ChannelLog(models.Model):
         return ChannelLog.objects.filter(id=self.id)
 
     def get_request_formatted(self):
-        if not self.request:
+        if not self.request:  # pragma: no cover
             return "%s %s" % (self.method, self.url)
 
         try:
@@ -2200,21 +2216,27 @@ def get_alert_user():
 
 
 class ChannelSession(SmartModel):
-    PENDING = "P"
-    QUEUED = "Q"
-    RINGING = "R"
-    IN_PROGRESS = "I"
-    COMPLETED = "D"
-    BUSY = "B"
-    FAILED = "F"
-    NO_ANSWER = "N"
-    CANCELED = "C"
+    PENDING = "P"  # initial state for all sessions
+    QUEUED = "Q"  # the session is queued internally
+    WIRED = "W"  # the API provider has confirmed that it successfully received the API request
+
+    # valid for IVR sessions
+    RINGING = "R"  # the call in ringing
+    IN_PROGRESS = "I"  # the call has been answered
+    BUSY = "B"  # the call is busy or rejected by the user
+    FAILED = "F"  # the platform failed to initiate the call (bad phone number)
+    NO_ANSWER = "N"  # the call has timed-out or ringed-out
+    CANCELED = "C"  # the call was terminated by platform
+    COMPLETED = "D"  # the call was completed successfully
+
+    # valid for USSD sessions
     TRIGGERED = "T"
     INTERRUPTED = "X"
     INITIATED = "A"
     ENDING = "E"
 
-    DONE = [COMPLETED, BUSY, FAILED, NO_ANSWER, CANCELED, INTERRUPTED]
+    DONE = (COMPLETED, BUSY, FAILED, NO_ANSWER, CANCELED, INTERRUPTED)
+    RETRY_CALL = (BUSY, NO_ANSWER)
 
     INCOMING = "I"
     OUTGOING = "O"
@@ -2229,6 +2251,7 @@ class ChannelSession(SmartModel):
     STATUS_CHOICES = (
         (PENDING, "Pending"),
         (QUEUED, "Queued"),
+        (WIRED, "Wired"),
         (RINGING, "Ringing"),
         (IN_PROGRESS, "In Progress"),
         (COMPLETED, "Complete"),
@@ -2264,6 +2287,13 @@ class ChannelSession(SmartModel):
     org = models.ForeignKey(Org, on_delete=models.PROTECT, help_text="The organization this session belongs to")
     session_type = models.CharField(max_length=1, choices=TYPE_CHOICES, help_text="What sort of session this is")
     duration = models.IntegerField(default=0, null=True, help_text="The length of this session in seconds")
+
+    retry_count = models.IntegerField(
+        default=0, verbose_name=_("Retry Count"), help_text=_("The number of times this call has been retried")
+    )
+    next_attempt = models.DateTimeField(
+        verbose_name=_("Next Attempt"), help_text=_("When we should next attempt to make this call"), null=True
+    )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -2329,5 +2359,8 @@ class ChannelSession(SmartModel):
         session = self.get_session()
         if session:
             session.release()
+
+        for msg in self.msgs.all():
+            msg.release()
 
         self.delete()

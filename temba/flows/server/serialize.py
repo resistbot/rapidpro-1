@@ -99,6 +99,10 @@ def serialize_label(label):
     return {"uuid": str(label.uuid), "name": label.name}
 
 
+def serialize_language(language):
+    return {"iso": language.iso_code, "name": language.name}
+
+
 def serialize_location_hierarchy(country, aliases_from_org=None):
     """
     Serializes a country as a location hierarchy, e.g.
@@ -151,3 +155,7 @@ def serialize_message(msg):
         serialized["attachments"] = msg.attachments
 
     return serialized
+
+
+def serialize_resthook(resthook):
+    return {"slug": resthook.slug, "subscribers": [s.target_url for s in resthook.subscribers.all()]}

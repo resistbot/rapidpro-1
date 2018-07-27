@@ -36,7 +36,7 @@ from temba.flows.models import FlowRun, FlowStart
 from temba.flows.tasks import squash_flowpathcounts, squash_flowruncounts
 from temba.locations.models import AdminBoundary
 from temba.msgs.models import Label, Msg
-from temba.msgs.tasks import squash_labelcounts
+from temba.msgs.tasks import squash_msgcounts
 from temba.orgs.models import Org
 from temba.orgs.tasks import squash_topupcredits
 from temba.utils import chunk_list
@@ -118,7 +118,7 @@ CONTACT_NAMES = (
     ("Anne", "Bob", "Cathy", "Dave", "Evan", "Freda", "George", "Hallie", "Igor"),
     ("Jameson", "Kardashian", "Lopez", "Mooney", "Newman", "O'Shea", "Poots", "Quincy", "Roberts"),
 )
-CONTACT_LANGS = (None, "eng", "fre", "spa", "kin")
+CONTACT_LANGS = (None, "eng", "fra", "spa", "kin")
 CONTACT_HAS_TEL_PROB = 0.9  # 9/10 contacts have a phone number
 CONTACT_HAS_TWITTER_PROB = 0.1  # 1/10 contacts have a twitter handle
 CONTACT_IS_STOPPED_PROB = 0.01  # 1/100 contacts are stopped
@@ -407,7 +407,7 @@ class Command(BaseCommand):
 
         for org in orgs:
             for type in Archive.TYPE_CHOICES:
-                end = timezone.now()
+                end = timezone.now() - timedelta(days=90)
 
                 # daily archives up until now
                 for idx in range(0, end.day - 2):
@@ -416,7 +416,7 @@ class Command(BaseCommand):
                     create_archive(MAX_RECORDS_PER_DAY, start, Archive.PERIOD_DAILY)
 
                 # month archives before that
-                end = timezone.now()
+                end = timezone.now() - timedelta(days=90)
                 for idx in range(0, ARCHIVES):
                     # last day of the previous month
                     end = end.replace(day=1) - timedelta(days=1)
@@ -708,7 +708,7 @@ class Command(BaseCommand):
         squash_flowpathcounts()
         squash_flowruncounts()
         squash_topupcredits()
-        squash_labelcounts()
+        squash_msgcounts()
 
     def start_flow_activity(self, org):
         assert not org.cache["activity"]

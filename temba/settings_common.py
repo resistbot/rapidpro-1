@@ -56,6 +56,8 @@ STORAGE_ROOT_DIR = "test_orgs" if TESTING else "orgs"
 AWS_ACCESS_KEY_ID = "aws_access_key_id"
 AWS_SECRET_ACCESS_KEY = "aws_secret_access_key"
 
+AWS_DEFAULT_ACL = "private"
+
 # -----------------------------------------------------------------------------------
 # On Unix systems, a value of None will cause Django to use the same
 # timezone as the operating system.
@@ -151,6 +153,7 @@ TEMPLATES = [
                 "temba.channels.views.channel_status_processor",
                 "temba.msgs.views.send_message_auto_complete_processor",
                 "temba.orgs.context_processors.settings_includer",
+                "temba.orgs.context_processors.user_orgs_for_brand",
             ],
             "loaders": [
                 "temba.utils.haml.HamlFilesystemLoader",
@@ -333,7 +336,7 @@ PERMISSIONS = {
     "contacts.contactfield": ("api", "json", "managefields"),
     "contacts.contactgroup": ("api",),
     "ivr.ivrcall": ("start",),
-    "archives.archive": ("api",),
+    "archives.archive": ("api", "run", "message"),
     "locations.adminboundary": ("alias", "api", "boundaries", "geometry"),
     "orgs.org": (
         "accounts",
@@ -477,6 +480,7 @@ GROUP_PERMISSIONS = {
         "flows.flowrun_delete",
         "flows.flow_editor_next",
         "orgs.org_dashboard",
+        "orgs.org_delete",
         "orgs.org_grant",
         "orgs.org_manage",
         "orgs.org_update",
@@ -821,6 +825,7 @@ CELERYBEAT_SCHEDULE = {
     "check-flow-timeouts": {"task": "check_flow_timeouts_task", "schedule": timedelta(seconds=20)},
     "check-credits": {"task": "check_credits_task", "schedule": timedelta(seconds=900)},
     "check-messages-task": {"task": "check_messages_task", "schedule": timedelta(seconds=300)},
+    "check-calls-task": {"task": "check_calls_task", "schedule": timedelta(seconds=300)},
     "check-elasticsearch-lag": {"task": "check_elasticsearch_lag", "schedule": timedelta(seconds=300)},
     "fail-old-messages": {"task": "fail_old_messages", "schedule": crontab(hour=0, minute=0)},
     "clear-old-msg-external-ids": {"task": "clear_old_msg_external_ids", "schedule": crontab(hour=2, minute=0)},
@@ -830,11 +835,12 @@ CELERYBEAT_SCHEDULE = {
     "squash-flowruncounts": {"task": "squash_flowruncounts", "schedule": timedelta(seconds=300)},
     "squash-flowpathcounts": {"task": "squash_flowpathcounts", "schedule": timedelta(seconds=300)},
     "squash-channelcounts": {"task": "squash_channelcounts", "schedule": timedelta(seconds=300)},
-    "squash-systemlabels": {"task": "squash_systemlabels", "schedule": timedelta(seconds=300)},
+    "squash-msgcounts": {"task": "squash_msgcounts", "schedule": timedelta(seconds=300)},
     "squash-topupcredits": {"task": "squash_topupcredits", "schedule": timedelta(seconds=300)},
     "squash-contactgroupcounts": {"task": "squash_contactgroupcounts", "schedule": timedelta(seconds=300)},
     "resolve-twitter-ids-task": {"task": "resolve_twitter_ids_task", "schedule": timedelta(seconds=900)},
     "refresh-jiochat-access-tokens": {"task": "refresh_jiochat_access_tokens", "schedule": timedelta(seconds=3600)},
+    "refresh-wechat-access-tokens": {"task": "refresh_wechat_access_tokens", "schedule": timedelta(seconds=3600)},
     "refresh-whatsapp-tokens": {"task": "refresh_whatsapp_tokens", "schedule": timedelta(hours=24)},
 }
 
@@ -888,6 +894,7 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework.authentication.SessionAuthentication",
         "temba.api.support.APITokenAuthentication",
+        "temba.api.support.APIBasicAuthentication",
     ),
     "DEFAULT_THROTTLE_CLASSES": ("temba.api.support.OrgRateThrottle",),
     "DEFAULT_THROTTLE_RATES": {
@@ -978,6 +985,7 @@ CHANNEL_TYPES = [
     "temba.channels.types.nexmo.NexmoType",
     "temba.channels.types.africastalking.AfricasTalkingType",
     "temba.channels.types.blackmyna.BlackmynaType",
+    "temba.channels.types.burstsms.BurstSMSType",
     "temba.channels.types.chikka.ChikkaType",
     "temba.channels.types.clickatell.ClickatellType",
     "temba.channels.types.dartmedia.DartMediaType",
@@ -1011,6 +1019,7 @@ CHANNEL_TYPES = [
     "temba.channels.types.twitter_activity.TwitterActivityType",
     "temba.channels.types.verboice.VerboiceType",
     "temba.channels.types.viber_public.ViberPublicType",
+    "temba.channels.types.wechat.WeChatType",
     "temba.channels.types.yo.YoType",
     "temba.channels.types.zenvia.ZenviaType",
 ]
