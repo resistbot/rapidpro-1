@@ -404,7 +404,9 @@ class ContactWriteSerializer(WriteSerializer):
         # update our fields
         if fields is not None:
             for key, value in fields.items():
-                existing_by_key = ContactField.objects.filter(org=self.org, key__iexact=key, is_active=True).first()
+                existing_by_key = ContactField.user_fields.filter(
+                    org=self.org, key__iexact=key, is_active=True
+                ).first()
                 if existing_by_key:
                     self.instance.set_field(self.user, existing_by_key.key, value)
                     continue
@@ -465,7 +467,7 @@ class ContactFieldWriteSerializer(WriteSerializer):
             if not ContactField.is_valid_key(key):
                 raise serializers.ValidationError(_("Generated key for '%s' is invalid or a reserved name") % label)
 
-        fields_count = ContactField.objects.filter(org=self.org).count()
+        fields_count = ContactField.user_fields.filter(org=self.org).count()
         if not self.instance and fields_count >= ContactField.MAX_ORG_CONTACTFIELDS:
             raise serializers.ValidationError(
                 "This org has %s contact fields and the limit is %s. "
@@ -605,7 +607,7 @@ class FlowRunWriteSerializer(WriteSerializer):
         if value:
             self.flow_obj = Flow.objects.filter(org=self.org, uuid=value).first()
             if not self.flow_obj:  # pragma: needs cover
-                raise serializers.ValidationError(_("Unable to find contact with uuid: %s") % value)
+                raise serializers.ValidationError(_("Unable to find flow with uuid: %s") % value)
 
             if self.flow_obj.is_archived:  # pragma: needs cover
                 raise serializers.ValidationError("You cannot start an archived flow.")
