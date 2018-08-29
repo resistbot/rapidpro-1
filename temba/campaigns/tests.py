@@ -1,4 +1,3 @@
-import json
 from datetime import timedelta
 
 import pytz
@@ -14,6 +13,7 @@ from temba.flows.models import ActionSet, Flow, FlowRevision, FlowRun, FlowStart
 from temba.msgs.models import Msg
 from temba.orgs.models import Language, Org, get_current_export_version
 from temba.tests import ESMockWithScroll, TembaTest, also_in_flowserver
+from temba.utils import json
 from temba.values.constants import Value
 
 from .models import Campaign, CampaignEvent, EventFire
@@ -305,6 +305,7 @@ class CampaignTest(TembaTest):
         event = CampaignEvent.objects.get()
         flow = event.flow
         self.assertEqual(Flow.MESSAGE, flow.flow_type)
+        self.assertTrue(flow.is_system)
 
         entry = ActionSet.objects.filter(uuid=flow.entry_uuid)[0]
         msg = entry.get_actions()[0].msg

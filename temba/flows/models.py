@@ -1,4 +1,3 @@
-import json
 import logging
 import numbers
 import time
@@ -60,7 +59,7 @@ from temba.msgs.models import (
     Msg,
 )
 from temba.orgs.models import Language, Org, get_current_export_version
-from temba.utils import analytics, chunk_list, on_transaction_commit
+from temba.utils import analytics, chunk_list, json, on_transaction_commit
 from temba.utils.dates import datetime_to_str, str_to_datetime
 from temba.utils.email import is_valid_address
 from temba.utils.export import BaseExportAssetStore, BaseExportTask
@@ -72,7 +71,7 @@ from temba.utils.text import slugify_with
 from temba.values.constants import Value
 
 from . import server
-from .server import trial
+from .server.trial import campaigns as trial_campaigns, resumes as trial_resumes
 
 logger = logging.getLogger(__name__)
 
@@ -450,6 +449,8 @@ class Flow(TembaModel):
 
     is_archived = models.BooleanField(default=False, help_text=_("Whether this flow is archived"))
 
+    is_system = models.NullBooleanField(default=False, help_text=_("Whether this is a system created flow"))
+
     flow_type = models.CharField(max_length=1, choices=FLOW_TYPES, default=FLOW, help_text=_("The type of this flow"))
 
     metadata = JSONAsTextField(
@@ -500,14 +501,21 @@ class Flow(TembaModel):
         related_name="dependent_flows",
         verbose_name=_(""),
         blank=True,
-        help_text=("Any fields this flow depends on"),
+        help_text=_("Any fields this flow depends on"),
     )
 
     flow_server_enabled = models.BooleanField(default=False, help_text=_("Run this flow using the flow server"))
 
     @classmethod
     def create(
-        cls, org, user, name, flow_type=FLOW, expires_after_minutes=FLOW_DEFAULT_EXPIRES_AFTER, base_language=None
+        cls,
+        org,
+        user,
+        name,
+        flow_type=FLOW,
+        expires_after_minutes=FLOW_DEFAULT_EXPIRES_AFTER,
+        base_language=None,
+        **kwargs,
     ):
         flow = Flow.objects.create(
             org=org,
@@ -518,6 +526,7 @@ class Flow(TembaModel):
             saved_by=user,
             created_by=user,
             modified_by=user,
+            **kwargs,
         )
 
         analytics.track(user.username, "nyaruka.flow_created", dict(name=name))
@@ -529,7 +538,7 @@ class Flow(TembaModel):
         Creates a special 'single message' flow
         """
         name = "Single Message (%s)" % str(uuid4())
-        flow = Flow.create(org, user, name, flow_type=Flow.MESSAGE)
+        flow = Flow.create(org, user, name, flow_type=Flow.MESSAGE, is_system=True)
         flow.update_single_message_flow(message, base_language)
         return flow
 
@@ -968,7 +977,7 @@ class Flow(TembaModel):
                 Msg.mark_handled(msg)
                 return True, []
 
-            flowserver_trial = trial.maybe_start_resume(run) if allow_trial else None
+            trial = trial_resumes.maybe_start(run) if allow_trial else None
 
             (handled, msgs) = Flow.handle_destination(
                 destination,
@@ -986,18 +995,11 @@ class Flow(TembaModel):
             if handled:
                 analytics.gauge("temba.run_resumes")
 
-                if flowserver_trial:
-                    trial_result = None
-
+                if trial:
                     if expired_child_run:
-                        trial_result = trial.end_resume(flowserver_trial, expired_child_run=expired_child_run)
+                        trial_resumes.end(trial, expired_child_run=expired_child_run)
                     elif msg and msg.id:
-                        trial_result = trial.end_resume(flowserver_trial, msg_in=msg)
-
-                    if trial_result is not None:
-                        analytics.gauge(
-                            "temba.flowserver_trial.%s" % ("resume_pass" if trial_result else "resume_fail")
-                        )
+                        trial_resumes.end(trial, msg_in=msg)
 
                 return True, msgs
 
@@ -2064,7 +2066,14 @@ class Flow(TembaModel):
 
         # if there are fewer contacts than our batch size, do it immediately
         if len(all_contact_ids) < START_FLOW_BATCH_SIZE:
-            return self.start_msg_flow_batch(
+
+            # if this is a campaign event flow to one contact, let's trial it in the flowserver
+            if self.flow_type == Flow.MESSAGE and len(all_contact_ids) == 1:
+                trial = trial_campaigns.maybe_start(self, all_contact_ids[0], campaign_event)
+            else:
+                trial = None
+
+            runs = self.start_msg_flow_batch(
                 all_contact_ids,
                 broadcasts=broadcasts,
                 started_flows=started_flows,
@@ -2074,6 +2083,11 @@ class Flow(TembaModel):
                 parent_run=parent_run,
                 parent_context=parent_context,
             )
+
+            if trial and len(runs) == 1:
+                trial_campaigns.end(trial, runs[0])
+
+            return runs
 
         # otherwise, create batches instead
         else:
@@ -3117,7 +3131,6 @@ class FlowRun(RequireUpdateFieldsMixin, models.Model):
     fields = JSONAsTextField(
         blank=True,
         null=True,
-        object_pairs_hook=OrderedDict,
         default=dict,
         help_text=_("A JSON representation of any custom flow values the user has saved away"),
     )

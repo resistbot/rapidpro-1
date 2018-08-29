@@ -1,5 +1,3 @@
-import json
-
 import iso8601
 import pytz
 from rest_framework import serializers
@@ -13,8 +11,8 @@ from temba.flows.models import Flow, FlowRun, FlowStart
 from temba.locations.models import AdminBoundary
 from temba.msgs.models import PENDING, QUEUED, Broadcast, Label, Msg
 from temba.msgs.tasks import send_broadcast_task
-from temba.utils import extract_constants, on_transaction_commit
-from temba.utils.dates import datetime_to_json_date
+from temba.utils import extract_constants, json, on_transaction_commit
+from temba.utils.json import datetime_to_json_date
 from temba.values.constants import Value
 
 from . import fields
@@ -488,6 +486,9 @@ class ContactWriteSerializer(WriteSerializer):
         return value
 
     def validate(self, data):
+        if self.instance and not self.instance.is_active:
+            raise serializers.ValidationError("Inactive contacts can't be modified.")
+
         # we allow creation of contacts by URN used for lookup
         if not data.get("urns") and "urns__identity" in self.context["lookup_values"]:
             url_urn = self.context["lookup_values"]["urns__identity"]

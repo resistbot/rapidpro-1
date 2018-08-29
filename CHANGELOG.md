@@ -1,3 +1,29 @@
+v4.4.0
+----------
+ * Fix intercom ResourceNotFound on Org.Signup
+ * Remove follow triggers and channel events
+ * Add Flow.is_system and start populating for new campaign event single message flows
+
+v4.3.8
+----------
+ * Data migration to deactivate all old style Twitter channels
+ * Update Nexmo client
+
+v4.3.4
+----------
+ * Increase IVR logging verbosity
+ * Trial all campaign message flows in flowserver
+ * Tweak android recommendation
+
+v4.3.3
+----------
+ * Run Table should only exclude the referenced run, and include greater Ids
+ * Raise validation error ehen trying action inactive contacts over API
+ * Remove uservoice as a dependency
+ * Update versions of Celery, Postgis, Nexmo, Twilio
+ * Fix Python 3.7 issues
+ * Clear out archive org directory when full releasing orgs
+
 v4.3.2
 ----------
  * Update expressions library to get EPOCH() function

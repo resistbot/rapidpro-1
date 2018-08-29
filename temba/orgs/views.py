@@ -1,5 +1,4 @@
 import itertools
-import json
 import logging
 from collections import OrderedDict
 from datetime import datetime, timedelta
@@ -48,7 +47,7 @@ from temba.campaigns.models import Campaign
 from temba.channels.models import Channel
 from temba.flows.models import Flow
 from temba.formax import FormaxMixin
-from temba.utils import analytics, get_anonymous_user, languages
+from temba.utils import analytics, get_anonymous_user, json, languages
 from temba.utils.email import is_valid_address
 from temba.utils.http import http_headers
 from temba.utils.timezones import TimeZoneFormField
@@ -2031,6 +2030,8 @@ class OrgCRUDL(SmartCRUDL):
 
             user = authenticate(username=self.user.username, password=self.form.cleaned_data["password"])
             login(self.request, user)
+
+            analytics.identify(user, brand=self.request.branding["slug"], org=obj)
             analytics.track(self.request.user.username, "temba.org_signup", dict(org=obj.name))
 
             return obj

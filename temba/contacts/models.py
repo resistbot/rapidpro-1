@@ -1,5 +1,4 @@
 import datetime
-import json
 import logging
 import os
 import time
@@ -27,7 +26,7 @@ from temba.assets.models import register_asset_store
 from temba.channels.models import Channel, ChannelEvent
 from temba.locations.models import AdminBoundary
 from temba.orgs.models import Org, OrgLock
-from temba.utils import analytics, chunk_list, format_number, get_anonymous_user, on_transaction_commit
+from temba.utils import analytics, chunk_list, format_number, get_anonymous_user, json, on_transaction_commit
 from temba.utils.cache import get_cacheable_attr
 from temba.utils.dates import str_to_datetime
 from temba.utils.export import BaseExportAssetStore, BaseExportTask, TableExporter
@@ -1980,7 +1979,7 @@ class Contact(RequireUpdateFieldsMixin, TembaModel):
         Contact.bulk_cache_initialize(self.org, [self])
 
     @classmethod
-    def bulk_cache_initialize(cls, org, contacts, for_show_only=False):
+    def bulk_cache_initialize(cls, org, contacts):
         """
         Performs optimizations on our contacts to prepare them to send. This includes loading all our contact fields for
         variable substitution.
@@ -1988,20 +1987,17 @@ class Contact(RequireUpdateFieldsMixin, TembaModel):
         if not contacts:
             return
 
-        fields = org.cached_contact_fields.values()
-        if for_show_only:
-            fields = [f for f in fields if f.show_in_table]
-
         contact_map = dict()
         for contact in contacts:
             contact_map[contact.id] = contact
-            setattr(contact, "__urns", list())  # initialize URN list cache (setattr avoids name mangling or __urns)
+            # initialize URN list cache
+            setattr(contact, "_urns_cache", list())
 
         # cache all URN values (a priority ordered list on each contact)
         urns = ContactURN.objects.filter(contact__in=contact_map.keys()).order_by("contact", "-priority", "pk")
         for urn in urns:
             contact = contact_map[urn.contact_id]
-            getattr(contact, "__urns").append(urn)
+            getattr(contact, "_urns_cache").append(urn)
 
         # set the cache initialize as correct
         for contact in contacts:
@@ -2101,14 +2097,14 @@ class Contact(RequireUpdateFieldsMixin, TembaModel):
         return self.urns.filter(scheme=scheme).order_by("-priority", "pk")
 
     def clear_urn_cache(self):
-        if hasattr(self, "__urns"):
-            delattr(self, "__urns")
+        if hasattr(self, "_urns_cache"):
+            delattr(self, "_urns_cache")
 
     def get_urns(self):
         """
         Gets all URNs ordered by priority
         """
-        cache_attr = "__urns"
+        cache_attr = "_urns_cache"
         if hasattr(self, cache_attr):
             return getattr(self, cache_attr)
 
@@ -2200,8 +2196,7 @@ class Contact(RequireUpdateFieldsMixin, TembaModel):
             Contact.objects.filter(id__in=modified_contacts).update(modified_on=timezone.now())
 
         # clear URN cache
-        if hasattr(self, "__urns"):
-            delattr(self, "__urns")
+        self.clear_urn_cache()
 
     def update_static_groups(self, user, groups):
         """
@@ -2387,11 +2382,6 @@ class ContactURN(models.Model):
     CONTEXT_KEYS_TO_LABEL = {c[2]: c[1] for c in URN_SCHEME_CONFIG}
     IMPORT_HEADER_TO_SCHEME = {s[0].lower(): s[1] for s in IMPORT_HEADERS}
 
-    SCHEMES_SUPPORTING_FOLLOW = {
-        TWITTER_SCHEME,
-        TWITTERID_SCHEME,
-        JIOCHAT_SCHEME,
-    }  # schemes that support "follow" triggers
     # schemes that support "new conversation" triggers
     SCHEMES_SUPPORTING_NEW_CONVERSATION = {FACEBOOK_SCHEME, VIBER_SCHEME, TELEGRAM_SCHEME}
     SCHEMES_SUPPORTING_REFERRALS = {FACEBOOK_SCHEME}  # schemes that support "referral" triggers

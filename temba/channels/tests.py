@@ -3,7 +3,6 @@ import base64
 import copy
 import hashlib
 import hmac
-import json
 import time
 import uuid
 from datetime import timedelta
@@ -61,7 +60,7 @@ from temba.orgs.models import (
 )
 from temba.tests import ESMockWithScroll, MockResponse, TembaTest
 from temba.triggers.models import Trigger
-from temba.utils import dict_to_struct, get_anonymous_user
+from temba.utils import dict_to_struct, get_anonymous_user, json
 from temba.utils.dates import datetime_to_ms, ms_to_datetime
 from temba.utils.queues import push_task
 
@@ -1228,7 +1227,9 @@ class ChannelTest(TembaTest):
         with patch("temba.utils.nexmo.NexmoClient.update_account") as connect:
             connect.return_value = True
             with patch("nexmo.Client.create_application") as create_app:
-                create_app.return_value = dict(id="app-id", keys=dict(private_key="private-key"))
+                create_app.return_value = bytes(
+                    json.dumps(dict(id="app-id", keys=dict(private_key="private-key\n"))), encoding="utf-8"
+                )
                 self.org.connect_nexmo("123", "456", self.admin)
                 self.org.save()
         self.assertTrue(self.org.is_connected_to_nexmo())
@@ -1247,7 +1248,7 @@ class ChannelTest(TembaTest):
         self.assertEqual(channel_config[Channel.CONFIG_NEXMO_API_KEY], "123")
         self.assertEqual(channel_config[Channel.CONFIG_NEXMO_API_SECRET], "456")
         self.assertEqual(channel_config[Channel.CONFIG_NEXMO_APP_ID], "app-id")
-        self.assertEqual(channel_config[Channel.CONFIG_NEXMO_APP_PRIVATE_KEY], "private-key")
+        self.assertEqual(channel_config[Channel.CONFIG_NEXMO_APP_PRIVATE_KEY], "private-key\n")
 
         # reading our nexmo channel should now offer a disconnect option
         nexmo = self.org.channels.filter(channel_type="NX").first()
@@ -1372,7 +1373,7 @@ class ChannelTest(TembaTest):
             NEXMO_SECRET: "1234",
             NEXMO_UUID: self.nexmo_uuid,
             NEXMO_APP_ID: "nexmo-app-id",
-            NEXMO_APP_PRIVATE_KEY: "nexmo-private-key",
+            NEXMO_APP_PRIVATE_KEY: "nexmo-private-key\n",
         }
 
         org = self.channel.org
@@ -1452,7 +1453,9 @@ class ChannelTest(TembaTest):
         with patch("temba.utils.nexmo.NexmoClient.update_account") as connect:
             connect.return_value = True
             with patch("nexmo.Client.create_application") as create_app:
-                create_app.return_value = dict(id="app-id", keys=dict(private_key="private-key"))
+                create_app.return_value = bytes(
+                    json.dumps(dict(id="app-id", keys=dict(private_key="private-key\n"))), encoding="utf-8"
+                )
                 self.org.connect_nexmo("123", "456", self.admin)
                 self.org.save()
 
@@ -2021,7 +2024,9 @@ class ChannelTest(TembaTest):
     @patch("nexmo.Client.update_call")
     @patch("nexmo.Client.create_application")
     def test_get_ivr_client(self, mock_create_application, mock_update_call):
-        mock_create_application.return_value = dict(id="app-id", keys=dict(private_key="private-key"))
+        mock_create_application.return_value = bytes(
+            json.dumps(dict(id="app-id", keys=dict(private_key="private-key\n"))), encoding="utf-8"
+        )
         mock_update_call.return_value = dict(uuid="12345")
 
         channel = Channel.create(self.org, self.user, "RW", "A", "Tigo", "+250725551212", secret="11111", gcm_id="456")
@@ -2657,77 +2662,6 @@ class MageHandlerTest(TembaTest):
         self.assertEqual(400, response.status_code)
         response = self.client.post(url, dict(message_id="xx"), **headers)
         self.assertEqual(400, response.status_code)
-
-    @override_settings(MAGE_AUTH_TOKEN="abc123")
-    def test_follow_notification(self):
-        url = reverse("handlers.mage_handler", args=["follow_notification"])
-        headers = dict(HTTP_AUTHORIZATION="Token %s" % settings.MAGE_AUTH_TOKEN)
-
-        flow = self.create_flow()
-
-        channel = Channel.create(self.org, self.user, None, "TT", "Twitter Channel", address="billy_bob")
-
-        Trigger.objects.create(
-            created_by=self.user,
-            modified_by=self.user,
-            org=self.org,
-            trigger_type=Trigger.TYPE_FOLLOW,
-            flow=flow,
-            channel=channel,
-        )
-
-        contact = self.create_contact("Mary Jo", twitter="mary_jo")
-        urn = contact.get_urn(TWITTER_SCHEME)
-
-        response = self.client.post(url, dict(channel_id=channel.id, contact_urn_id=urn.id), **headers)
-        self.assertEqual(200, response.status_code)
-        self.assertEqual(1, flow.runs.all().count())
-        self.assertTrue(
-            ChannelEvent.objects.filter(channel=channel, contact=contact, event_type=ChannelEvent.TYPE_FOLLOW)
-        )
-
-        contact_counts = ContactGroup.get_system_group_counts(self.org)
-        self.assertEqual(2, contact_counts[ContactGroup.TYPE_ALL])
-
-        # simulate a a follow from existing stopped contact
-        contact.stop(self.admin)
-
-        contact_counts = ContactGroup.get_system_group_counts(self.org)
-        self.assertEqual(1, contact_counts[ContactGroup.TYPE_ALL])
-
-        response = self.client.post(url, dict(channel_id=channel.id, contact_urn_id=urn.id), **headers)
-        self.assertEqual(200, response.status_code)
-        self.assertEqual(2, flow.runs.all().count())
-
-        contact_counts = ContactGroup.get_system_group_counts(self.org)
-        self.assertEqual(2, contact_counts[ContactGroup.TYPE_ALL])
-
-        contact.refresh_from_db()
-        self.assertFalse(contact.is_stopped)
-
-        # simulate scenario where Mage has added new contact with name that should put it into a dynamic group
-        mage_contact, mage_contact_urn = self.create_contact_like_mage("Bob", "bobby81")
-
-        response = self.client.post(
-            url, dict(channel_id=channel.id, contact_urn_id=mage_contact_urn.id, new_contact=True), **headers
-        )
-        self.assertEqual(200, response.status_code)
-        self.assertEqual(3, flow.runs.all().count())
-
-        # check that contact ended up dynamic group
-        self.assertEqual([mage_contact], list(self.dyn_group.contacts.order_by("name")))
-
-        # check contact count updated
-        contact_counts = ContactGroup.get_system_group_counts(self.org)
-        self.assertEqual(contact_counts[ContactGroup.TYPE_ALL], 3)
-
-        # simulate the follow of a released channel
-        channel_events_count = ChannelEvent.objects.filter(channel=channel).count()
-        channel.release()
-
-        response = self.client.post(url, dict(channel_id=channel.id, contact_urn_id=urn.id), **headers)
-        self.assertEqual(200, response.status_code)
-        self.assertEqual(ChannelEvent.objects.filter(channel=channel).count(), channel_events_count)
 
     @override_settings(MAGE_AUTH_TOKEN="abc123")
     def test_stop_contact(self):

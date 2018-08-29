@@ -1,5 +1,4 @@
 import base64
-import json
 from datetime import datetime
 from urllib.parse import quote_plus
 from uuid import uuid4
@@ -29,6 +28,7 @@ from temba.locations.models import BoundaryAlias
 from temba.msgs.models import Broadcast, Label, Msg
 from temba.orgs.models import Language
 from temba.tests import AnonymousOrg, ESMockWithScroll, TembaTest
+from temba.utils import json
 from temba.values.constants import Value
 
 from . import fields
@@ -1328,7 +1328,7 @@ class APITest(TembaTest):
         hans = self.create_contact("Hans", "0788000004", org=self.org2)
 
         # no filtering
-        with self.assertNumQueries(NUM_BASE_REQUEST_QUERIES + 5):
+        with self.assertNumQueries(NUM_BASE_REQUEST_QUERIES + 4):
             response = self.fetchJSON(url)
 
         resp_json = response.json()
@@ -1585,6 +1585,9 @@ class APITest(TembaTest):
 
         jean.refresh_from_db()
         self.assertFalse(jean.is_active)
+
+        response = self.postJSON(url, "uuid=%s" % jean.uuid, {})
+        self.assertResponseError(response, "non_field_errors", "Inactive contacts can't be modified.")
 
         # create xavier
         response = self.postJSON(url, None, {"name": "Xavier", "urns": ["tel:+250-78-7777777", "twitter:XAVIER"]})

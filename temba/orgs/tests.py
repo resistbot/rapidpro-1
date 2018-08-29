@@ -1,5 +1,4 @@
 import io
-import json
 from datetime import timedelta
 from decimal import Decimal
 from uuid import uuid4
@@ -44,7 +43,7 @@ from temba.tests import MockResponse, TembaTest
 from temba.tests.s3 import MockS3Client
 from temba.tests.twilio import MockRequestValidator, MockTwilioClient
 from temba.triggers.models import Trigger
-from temba.utils import dict_to_struct, languages
+from temba.utils import dict_to_struct, json, languages
 from temba.utils.email import link_components
 
 from .context_processors import GroupPermWrapper
@@ -2070,7 +2069,9 @@ class OrgTest(TembaTest):
 
     @patch("nexmo.Client.create_application")
     def test_connect_nexmo(self, mock_create_application):
-        mock_create_application.return_value = dict(id="app-id", keys=dict(private_key="private-key"))
+        mock_create_application.return_value = bytes(
+            json.dumps(dict(id="app-id", keys=dict(private_key="private-key\n"))), encoding="utf-8"
+        )
         self.login(self.admin)
 
         # connect nexmo
@@ -2187,7 +2188,9 @@ class OrgTest(TembaTest):
 
     @patch("nexmo.Client.create_application")
     def test_nexmo_configuration(self, mock_create_application):
-        mock_create_application.return_value = dict(id="app-id", keys=dict(private_key="private-key"))
+        mock_create_application.return_value = bytes(
+            json.dumps(dict(id="app-id", keys=dict(private_key="private-key\n"))), encoding="utf-8"
+        )
 
         self.login(self.admin)
 
@@ -2492,6 +2495,22 @@ class OrgTest(TembaTest):
 
         response = self.client.get(reverse("orgs.topup_list"))
         self.assertContains(response, "600 Credits")
+
+    def test_account_value(self):
+
+        # base value
+        self.assertEqual(self.org.account_value(), 0.0)
+
+        # add a topup
+        TopUp.objects.create(
+            org=self.org,
+            price=123,
+            credits=1001,
+            expires_on=timezone.now() + timedelta(days=30),
+            created_by=self.admin,
+            modified_by=self.admin,
+        )
+        self.assertAlmostEqual(self.org.account_value(), 1.23)
 
 
 class AnonOrgTest(TembaTest):

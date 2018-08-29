@@ -1,6 +1,5 @@
 import copy
 import datetime
-import json
 import os
 import re
 import time
@@ -41,6 +40,7 @@ from temba.tests import (
 from temba.tests.s3 import MockS3Client
 from temba.triggers.models import Trigger
 from temba.ussd.models import USSDSession
+from temba.utils import json
 from temba.utils.dates import datetime_to_str
 from temba.utils.profiler import QueryTracker
 from temba.values.constants import Value
@@ -2959,16 +2959,6 @@ class FlowTest(TembaTest):
         self.assertEqual(flow_with_keywords.triggers.filter(is_archived=False).count(), 3)
         self.assertEqual(flow_with_keywords.triggers.filter(is_archived=False).exclude(groups=None).count(), 0)
 
-        # add triggers of other types
-        Trigger.objects.create(
-            created_by=self.admin,
-            modified_by=self.admin,
-            org=self.org,
-            trigger_type=Trigger.TYPE_FOLLOW,
-            flow=flow_with_keywords,
-            channel=self.channel,
-        )
-
         Trigger.objects.create(
             created_by=self.admin,
             modified_by=self.admin,
@@ -3001,7 +2991,7 @@ class FlowTest(TembaTest):
             flow=flow_with_keywords,
         )
 
-        self.assertEqual(flow_with_keywords.triggers.filter(is_archived=False).count(), 8)
+        self.assertEqual(flow_with_keywords.triggers.filter(is_archived=False).count(), 7)
 
         # test if form has expected fields
         post_data = dict()
@@ -3025,18 +3015,17 @@ class FlowTest(TembaTest):
         self.assertEqual(200, response.status_code)
         self.assertEqual(response.request["PATH_INFO"], reverse("flows.flow_list"))
         self.assertTrue(flow_with_keywords in response.context["object_list"].all())
-        self.assertEqual(flow_with_keywords.triggers.count(), 9)
+        self.assertEqual(flow_with_keywords.triggers.count(), 8)
         self.assertEqual(flow_with_keywords.triggers.filter(is_archived=True).count(), 2)
         self.assertEqual(
             flow_with_keywords.triggers.filter(is_archived=True, trigger_type=Trigger.TYPE_KEYWORD).count(), 2
         )
-        self.assertEqual(flow_with_keywords.triggers.filter(is_archived=False).count(), 7)
+        self.assertEqual(flow_with_keywords.triggers.filter(is_archived=False).count(), 6)
         self.assertEqual(
             flow_with_keywords.triggers.filter(is_archived=True, trigger_type=Trigger.TYPE_KEYWORD).count(), 2
         )
 
         # only keyword triggers got archived, other are stil active
-        self.assertTrue(flow_with_keywords.triggers.filter(is_archived=False, trigger_type=Trigger.TYPE_FOLLOW))
         self.assertTrue(flow_with_keywords.triggers.filter(is_archived=False, trigger_type=Trigger.TYPE_CATCH_ALL))
         self.assertTrue(flow_with_keywords.triggers.filter(is_archived=False, trigger_type=Trigger.TYPE_SCHEDULE))
         self.assertTrue(flow_with_keywords.triggers.filter(is_archived=False, trigger_type=Trigger.TYPE_MISSED_CALL))
@@ -5559,6 +5548,22 @@ class WebhookTest(TembaTest):
 
     @also_in_flowserver
     @override_settings(SEND_WEBHOOKS=True)
+    def test_webhook_decimals(self, in_flowserver):
+        flow = self.get_flow("webhook_decimal")
+        contact = self.create_contact("Ben Haggerty", "+250788383383")
+
+        self.mockRequest("GET", "/", '{ "decimal": 0.1 }')
+
+        run1, = flow.start([], [contact])
+        run1.refresh_from_db()
+
+        if not in_flowserver:
+            self.assertEqual(run1.fields, {"decimal": Decimal("0.1")})
+
+        self.assertEqual("Your webhook returned 0.1. Your number is 0.1", Msg.objects.get(contact=contact).text)
+
+    @also_in_flowserver
+    @override_settings(SEND_WEBHOOKS=True)
     def test_webhook(self, in_flowserver):
         flow = self.get_flow("webhook")
         contact = self.create_contact("Ben Haggerty", "+250788383383")
@@ -6723,6 +6728,21 @@ class FlowsTest(FlowFileTest):
             # now send another message
             self.send_message(favorites, "primus", contact=pete)
             self.send_message(favorites, "Pete", contact=pete)
+
+            response = self.client.get(reverse("flows.flow_run_table", args=[favorites.pk]))
+            self.assertEqual(len(response.context["runs"]), 1)
+            self.assertEqual(200, response.status_code)
+            self.assertContains(response, "Pete")
+            self.assertNotContains(response, "Jimmy")
+
+            # one more row to add
+            self.assertEqual(1, len(response.context["runs"]))
+
+            next_link = re.search('ic-append-from="(.*)" ic-trigger-on', force_text(response.content)).group(1)
+            response = self.client.get(next_link)
+            self.assertEqual(200, response.status_code)
+            self.assertEqual(1, len(response.context["runs"]))
+            self.assertContains(response, "Jimmy")
 
             # now only one active, one completed, and 5 total responses
             response = self.client.get(reverse("flows.flow_activity_chart", args=[favorites.pk]))
