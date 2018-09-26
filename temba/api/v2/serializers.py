@@ -12,7 +12,6 @@ from temba.locations.models import AdminBoundary
 from temba.msgs.models import PENDING, QUEUED, Broadcast, Label, Msg
 from temba.msgs.tasks import send_broadcast_task
 from temba.utils import extract_constants, json, on_transaction_commit
-from temba.utils.json import datetime_to_json_date
 from temba.values.constants import Value
 
 from . import fields
@@ -23,7 +22,7 @@ def format_datetime(value):
     """
     Datetime fields are formatted with microsecond accuracy for v2
     """
-    return datetime_to_json_date(value, micros=True) if value else None
+    return json.encode_datetime(value, micros=True) if value else None
 
 
 class ReadSerializer(serializers.ModelSerializer):
@@ -518,11 +517,12 @@ class ContactWriteSerializer(WriteSerializer):
                 self.instance.language = language
                 changed.append("language")
 
+            if changed:
+                self.instance.save(update_fields=changed, handle_update=True)
+
             if "urns" in self.validated_data and urns is not None:
                 self.instance.update_urns(self.context["user"], urns)
 
-            if changed:
-                self.instance.save(update_fields=changed)
         else:
             self.instance = Contact.get_or_create_by_urns(
                 self.context["org"], self.context["user"], name, urns=urns, language=language
@@ -530,8 +530,7 @@ class ContactWriteSerializer(WriteSerializer):
 
         # update our fields
         if custom_fields is not None:
-            for key, value in custom_fields.items():
-                self.instance.set_field(self.context["user"], key, value)
+            self.instance.set_fields(user=self.context["user"], fields=custom_fields)
 
         # update our groups
         if groups is not None:
@@ -842,6 +841,11 @@ class FlowStartWriteSerializer(WriteSerializer):
     extra = serializers.JSONField(required=False)
 
     def validate_extra(self, value):
+        # request is parsed by DRF.JSONParser, and if extra is a valid json it gets deserialized as dict
+        # in any other case we need to raise a ValidationError
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("Must be a valid JSON value")
+
         if not value:  # pragma: needs cover
             return None
         else:

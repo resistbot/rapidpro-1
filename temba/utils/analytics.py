@@ -11,7 +11,7 @@ from librato_bg import Client as LibratoClient
 from django.conf import settings
 from django.utils import timezone
 
-from temba.utils.json import datetime_to_json_date
+from temba.utils import json
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +98,7 @@ def identify_org(org, attributes=None):
         _intercom.companies.create(
             company_id=org.id,
             name=org.name,
-            created_at=datetime_to_json_date(org.created_on),
+            created_at=json.encode_datetime(org.created_on),
             custom_attributes=attributes,
             **intercom_attributes,
         )
@@ -114,7 +114,7 @@ def identify(user, brand, org):
         return
 
     attributes = dict(
-        email=user.email, first_name=user.first_name, segment=randint(1, 10), last_name=user.last_name, brand=brand
+        email=user.username, first_name=user.first_name, segment=randint(1, 10), last_name=user.last_name, brand=brand
     )
     user_name = f"{user.first_name} {user.last_name}"
     if org:
@@ -123,7 +123,7 @@ def identify(user, brand, org):
 
     # post to segment if configured
     if _segment:  # pragma: no cover
-        segment_analytics.identify(user.email, attributes)
+        segment_analytics.identify(user.username, attributes)
 
     # post to intercom if configured
     if _intercom:
@@ -132,13 +132,13 @@ def identify(user, brand, org):
             for key in ("first_name", "last_name", "email"):
                 attributes.pop(key, None)
 
-            intercom_user = _intercom.users.create(email=user.email, name=user_name, custom_attributes=attributes)
+            intercom_user = _intercom.users.create(email=user.username, name=user_name, custom_attributes=attributes)
 
             intercom_user.companies = [
                 dict(
                     company_id=org.id,
                     name=org.name,
-                    created_at=datetime_to_json_date(org.created_on),
+                    created_at=json.encode_datetime(org.created_on),
                     custom_attributes=dict(brand=org.brand, org_id=org.id),
                 )
             ]
@@ -182,7 +182,7 @@ def change_consent(email, consent):
 
     if _intercom:
         try:
-            change_date = datetime_to_json_date(timezone.now())
+            change_date = json.encode_datetime(timezone.now())
 
             user = get_intercom_user(email)
 

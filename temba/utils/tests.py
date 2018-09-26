@@ -230,11 +230,8 @@ class DatesTest(TembaTest):
         tz = pytz.timezone("Africa/Kigali")
         d2 = tz.localize(datetime.datetime(2014, 1, 2, 3, 4, 5, 6))
 
-        self.assertEqual(datetime_to_str(d2), "2014-01-02T01:04:05.000006Z")  # no format
-        self.assertEqual(datetime_to_str(d2, format="%Y-%m-%d"), "2014-01-02")  # format provided
-        self.assertEqual(datetime_to_str(d2, tz=tz), "2014-01-02T03:04:05.000006Z")  # in specific timezone
-        self.assertEqual(datetime_to_str(d2, ms=False), "2014-01-02T01:04:05Z")  # no ms
-        self.assertEqual(datetime_to_str(d2.date()), "2014-01-02T00:00:00.000000Z")  # no ms
+        self.assertEqual(datetime_to_str(d2, "%Y-%m-%d %H:%M", tz=tz), "2014-01-02 03:04")
+        self.assertEqual(datetime_to_str(d2, "%Y/%m/%d %H:%M", tz=pytz.UTC), "2014/01/02 01:04")
 
     def test_datetime_to_epoch(self):
         dt = iso8601.parse_date("2014-01-02T01:04:05.000Z")
@@ -439,6 +436,8 @@ class TemplateTagTest(TembaTest):
         self.assertEqual("icon-tree", icon(flow))
         self.assertEqual("", icon(None))
 
+
+class TemplateTagTestSimple(TestCase):
     def test_format_seconds(self):
         from temba.utils.templatetags.temba import format_seconds
 
@@ -493,6 +492,25 @@ class TemplateTagTest(TembaTest):
         self.assertEqual(", ", oxford(forloop(1, 4)))
         self.assertEqual(", and ", oxford(forloop(2, 4)))
         self.assertEqual(".", oxford(forloop(3, 4), "."))
+
+    def test_to_json(self):
+        from temba.utils.templatetags.temba import to_json
+
+        # only works with plain str objects
+        self.assertRaises(ValueError, to_json, dict())
+
+        self.assertEqual(to_json(json.dumps({})), 'JSON.parse("{}")')
+        self.assertEqual(to_json(json.dumps({"a": 1})), 'JSON.parse("{\\u0022a\\u0022: 1}")')
+        self.assertEqual(
+            to_json(json.dumps({"special": '"'})),
+            'JSON.parse("{\\u0022special\\u0022: \\u0022\\u005C\\u0022\\u0022}")',
+        )
+
+        # ecapes special <script>
+        self.assertEqual(
+            to_json(json.dumps({"special": '<script>alert("XSS");</script>'})),
+            'JSON.parse("{\\u0022special\\u0022: \\u0022\\u003Cscript\\u003Ealert(\\u005C\\u0022XSS\\u005C\\u0022)\\u003B\\u003C/script\\u003E\\u0022}")',
+        )
 
 
 class CacheTest(TembaTest):
@@ -690,7 +708,7 @@ class JsonTest(TembaTest):
         encoded = json.dumps(source)
 
         self.assertEqual(
-            json.loads(encoded), {"name": "Date Test", "age": Decimal("10"), "now": json.datetime_to_json_date(now)}
+            json.loads(encoded), {"name": "Date Test", "age": Decimal("10"), "now": json.encode_datetime(now)}
         )
 
         # test the same using our object mocking
@@ -1476,7 +1494,7 @@ class VoiceXMLTest(TembaTest):
         )
 
         response = voicexml.VXMLResponse()
-        response.gather(action="http://example.com", numDigits=1, timeout=45, finishOnKey="*")
+        response.gather(action="http://example.com", num_digits=1, timeout=45, finish_on_key="*")
 
         self.assertEqual(
             str(response),
@@ -1499,7 +1517,7 @@ class VoiceXMLTest(TembaTest):
         )
 
         response = voicexml.VXMLResponse()
-        response.record(action="http://example.com", method="post", maxLength=60)
+        response.record(action="http://example.com", method="post", max_length=60)
 
         self.assertEqual(
             str(response),
@@ -1594,7 +1612,7 @@ class NCCOTest(TembaTest):
         response.say("Hello")
         response.redirect("http://example.com/")
         response.say("Please make a recording")
-        response.record(action="http://example.com", method="post", maxLength=60)
+        response.record(action="http://example.com", method="post", max_length=60)
         response.say("Thanks")
         response.say("Allo")
         response.say("Cool")
@@ -1684,7 +1702,7 @@ class NCCOTest(TembaTest):
         )
 
         response = NCCOResponse()
-        response.gather(action="http://example.com", numDigits=1, timeout=45, finishOnKey="*")
+        response.gather(action="http://example.com", num_digits=1, timeout=45, finish_on_key="*")
 
         self.assertEqual(
             json.loads(str(response)),
@@ -1713,7 +1731,7 @@ class NCCOTest(TembaTest):
         )
 
         response = NCCOResponse()
-        response.record(action="http://example.com", method="post", maxLength=60)
+        response.record(action="http://example.com", method="post", max_length=60)
 
         self.assertEqual(
             json.loads(str(response)),
@@ -1732,7 +1750,7 @@ class NCCOTest(TembaTest):
             ],
         )
         response = NCCOResponse()
-        response.record(action="http://example.com?param=12", method="post", maxLength=60)
+        response.record(action="http://example.com?param=12", method="post", max_length=60)
 
         self.assertEqual(
             json.loads(str(response)),
@@ -1954,6 +1972,13 @@ class TestJSONAsTextField(TestCase):
             self.assertRaises(ValueError, JsonModelTestDefault.objects.first)
 
 
+class TestJSONField(TembaTest):
+    def test_jsonfield_decimal_encoding(self):
+        contact = self.create_contact("Xavier", number="+5939790990001")
+        contact.fields = {"1eaf5c91-8d56-4ca0-8e00-9b1c0b12e722": {"number": Decimal("123.45")}}
+        contact.save(update_fields=("fields",), handle_update=False)
+
+
 class MatchersTest(TembaTest):
     def test_string(self):
         self.assertEqual("abc", matchers.String())
@@ -2025,7 +2050,9 @@ class AnalyticsTest(TestCase):
         self.org = SimpleNamespace(
             id=1000, name="Some Org", brand="Some Brand", created_on=timezone.now(), account_value=lambda: 1000
         )
-        self.admin = SimpleNamespace(first_name="", last_name="", email="admin@example.com")
+        self.admin = SimpleNamespace(
+            username="admin@example.com", first_name="", last_name="", email="admin@example.com"
+        )
 
         self.intercom_mock = MagicMock()
         temba.utils.analytics._intercom = self.intercom_mock

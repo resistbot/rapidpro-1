@@ -532,14 +532,13 @@ class Org(SmartModel):
         from temba.contacts.models import ContactURN
 
         if contact_urn:
-            if contact_urn:
-                scheme = contact_urn.scheme
+            scheme = contact_urn.scheme
 
-                # if URN has a previously used channel that is still active, use that
-                if contact_urn.channel and contact_urn.channel.is_active:
-                    previous_sender = self.get_channel_delegate(contact_urn.channel, role)
-                    if previous_sender:
-                        return previous_sender
+            # if URN has a previously used channel that is still active, use that
+            if contact_urn.channel and contact_urn.channel.is_active:
+                previous_sender = self.get_channel_delegate(contact_urn.channel, role)
+                if previous_sender:
+                    return previous_sender
 
             if scheme == TEL_SCHEME:
                 path = contact_urn.path
@@ -557,7 +556,7 @@ class Org(SmartModel):
                 channels = []
                 if country_code:
                     for c in self.cached_channels:
-                        if c.country == country_code:
+                        if c.country == country_code and TEL_SCHEME in c.schemes:
                             channels.append(c)
 
                 # no country specific channel, try to find any channel at all
@@ -1122,7 +1121,7 @@ class Org(SmartModel):
         """
         formats = get_datetime_format(self.get_dayfirst())
         format = formats[1] if show_time else formats[0]
-        return datetime_to_str(datetime, format, False, self.timezone)
+        return datetime_to_str(datetime, format, self.timezone)
 
     def parse_datetime(self, datetime_string):
         if isinstance(datetime_string, datetime):
@@ -1337,6 +1336,15 @@ class Org(SmartModel):
     def create_system_contact_fields(self):
         from temba.contacts.models import ContactField
 
+        ContactField.system_fields.create(
+            org_id=self.id,
+            label=_("ID"),
+            key="id",
+            value_type=Value.TYPE_NUMBER,
+            show_in_table=False,
+            created_by=self.created_by,
+            modified_by=self.modified_by,
+        )
         ContactField.system_fields.create(
             org_id=self.id,
             label=_("Created On"),
@@ -1973,15 +1981,13 @@ class Org(SmartModel):
         campaign_prefetches = (
             Prefetch(
                 "events",
-                queryset=CampaignEvent.objects.filter(is_active=True).exclude(flow__flow_type=Flow.MESSAGE),
+                queryset=CampaignEvent.objects.filter(is_active=True).exclude(flow__is_system=True),
                 to_attr="flow_events",
             ),
             "flow_events__flow",
         )
 
-        all_flows = (
-            self.flows.filter(is_active=True).exclude(flow_type=Flow.MESSAGE).prefetch_related(*flow_prefetches)
-        )
+        all_flows = self.flows.filter(is_active=True).exclude(is_system=True).prefetch_related(*flow_prefetches)
         all_flow_map = {f.uuid: f for f in all_flows}
 
         if include_campaigns:

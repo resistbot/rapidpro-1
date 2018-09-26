@@ -12,7 +12,6 @@ from temba.flows.models import Flow, FlowRun, RuleSet
 from temba.locations.models import AdminBoundary
 from temba.msgs.models import Broadcast, Msg
 from temba.utils import json
-from temba.utils.json import datetime_to_json_date
 from temba.values.constants import Value
 
 # Maximum number of items that can be passed to bulk action endpoint. We don't currently enforce this for messages but
@@ -24,7 +23,7 @@ def format_datetime(value):
     """
     Datetime fields are limited to millisecond accuracy for v1
     """
-    return datetime_to_json_date(value, micros=False) if value else None
+    return json.encode_datetime(value, micros=False) if value else None
 
 
 def validate_bulk_fetch(fetched, uuids):
@@ -398,7 +397,7 @@ class ContactWriteSerializer(WriteSerializer):
 
         # save our contact if it changed
         if changed:
-            self.instance.save(update_fields=changed)
+            self.instance.save(update_fields=changed, handle_update=True)
 
         # update our fields
         if fields is not None:

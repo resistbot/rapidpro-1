@@ -4,7 +4,7 @@ from uuid import uuid4
 
 from smartmin.models import SmartModel
 
-from django.contrib.postgres.fields import HStoreField
+from django.contrib.postgres.fields import HStoreField, JSONField as DjangoJSONField
 from django.core import checks
 from django.core.exceptions import ValidationError
 from django.db import connection, models
@@ -184,6 +184,16 @@ class JSONAsTextField(CheckFieldDefaultMixin, models.Field):
         return name, path, args, kwargs
 
 
+class JSONField(DjangoJSONField):
+    """
+    Convenience subclass of the regular JSONField that uses our custom JSON encoder
+    """
+
+    def __init__(self, *args, **kwargs):
+        kwargs["encoder"] = json.TembaEncoder
+        super().__init__(*args, **kwargs)
+
+
 class TembaModel(SmartModel):
 
     uuid = models.CharField(
@@ -204,7 +214,7 @@ class RequireUpdateFieldsMixin(object):
         if self.id and "update_fields" not in kwargs:
             raise ValueError("Updating without specifying update_fields is disabled for this model")
 
-        return super().save(*args, **kwargs)
+        super().save(*args, **kwargs)
 
 
 class SquashableModel(models.Model):
