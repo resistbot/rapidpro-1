@@ -5782,16 +5782,17 @@ class WebhookTest(TembaTest):
         # we don't have the resthook registered yet, so this won't trigger any calls
         webhook_flow.start([], [self.contact])
 
-        # should have two messages of failures
+        # should have two messages
         msgs = list(self.contact.msgs.order_by("id"))
         self.assertEqual(msgs[0].text, "That was a success.")
         self.assertEqual(msgs[1].text, "The second succeeded.")
 
-        # but we should have created a webhook event regardless
-        self.assertTrue(WebHookEvent.objects.filter(resthook__slug="new-registration"))
+        if not in_flowserver:
+            # but we should have created a webhook event regardless
+            self.assertTrue(WebHookEvent.objects.filter(resthook__slug="new-registration"))
 
-        # ok, let's go add a listener for that event (should have been created automatically)
-        resthook = Resthook.objects.get(org=self.org, slug="new-registration")
+        # ok, let's go add a listener for that event
+        resthook = Resthook.get_or_create(self.org, slug="new-registration", user=self.admin)
         resthook.subscribers.create(
             target_url="http://localhost:49999/foo", created_by=self.admin, modified_by=self.admin
         )
@@ -6108,8 +6109,23 @@ class FlowsTest(FlowFileTest):
         # flow should be inactive
         self.assertFalse(Flow.objects.filter(id=favorites.id, is_active=True).exists())
 
-        # but all the runs should be deleted
-        self.assertFalse(FlowRun.objects.all().exists())
+        # but all the runs should not be deleted
+        self.assertEqual(FlowRun.objects.all().count(), 1)
+
+    def test_flow_with_runs_release(self):
+        # create a flow run
+        favorites = self.get_flow("favorites")
+        self.send_message(favorites, "green")
+
+        # now release our flow
+        favorites.release()
+        favorites.release_runs()
+
+        # flow should be inactive
+        self.assertFalse(Flow.objects.filter(id=favorites.id, is_active=True).exists())
+
+        # but all the runs should not be deleted
+        self.assertEqual(FlowRun.objects.all().count(), 0)
 
     def run_flowrun_deletion(self, delete_reason, test_cases):
         """
@@ -7853,7 +7869,7 @@ class FlowsTest(FlowFileTest):
 
         # should have an interrupted run
         self.assertEqual(
-            1, FlowRun.objects.filter(contact=self.contact, exit_type=FlowRun.EXIT_TYPE_INTERRUPTED).count()
+            2, FlowRun.objects.filter(contact=self.contact, exit_type=FlowRun.EXIT_TYPE_INTERRUPTED).count()
         )
 
     def test_decimal_substitution(self):
@@ -8214,11 +8230,11 @@ class FlowsTest(FlowFileTest):
         flow.refresh_from_db()
         self.assertFalse(flow.is_active)
 
-        # runs should be deleted
-        self.assertEqual(flow.runs.count(), 0)
+        # runs should not be deleted
+        self.assertEqual(flow.runs.count(), 2)
 
         # our campaign event should no longer be active
-        self.assertFalse(CampaignEvent.objects.filter(id=event1.id).exists())
+        self.assertFalse(CampaignEvent.objects.filter(id=event1.id, is_active=True).exists())
 
         # nor should our trigger
         self.assertFalse(Trigger.objects.filter(id=trigger.id).exists())
