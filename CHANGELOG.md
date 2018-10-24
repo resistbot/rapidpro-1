@@ -1,3 +1,18 @@
+v4.10.9
+----------
+ * Log and fail calls that cannot be started
+ * Allow contact.created_on in flows, init new event
+
+v4.10.8
+----------
+ * Deactivate events when updating campaigns
+ * Less aggressive event fire recreation
+ * Use SMTP SERVER org config and migrate old config keys
+
+v4.10.4
+----------
+ * Retry failed IVR calls
+
 v4.10.3
 ----------
  * Show all split types on run results, use elastic for searching

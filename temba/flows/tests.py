@@ -3220,7 +3220,16 @@ class FlowTest(TembaTest):
 
         field_names = [field for field in response.context_data["form"].fields]
         self.assertEqual(
-            field_names, ["name", "keyword_triggers", "expires_after_minutes", "ignore_triggers", "ivr_retry", "loc"]
+            field_names,
+            [
+                "name",
+                "keyword_triggers",
+                "expires_after_minutes",
+                "ignore_triggers",
+                "ivr_retry",
+                "ivr_retry_failed_events",
+                "loc",
+            ],
         )
 
         choices = response.context["form"].fields["expires_after_minutes"].choices
@@ -3273,6 +3282,18 @@ class FlowTest(TembaTest):
 
         voice_flow.refresh_from_db()
         self.assertEqual(voice_flow.metadata["ivr_retry"], 1440)
+        self.assertEqual(voice_flow.metadata.get("ivr_retry_failed_events"), False)
+
+        # flow with enabled ivr_retry_failed_events
+        post_data["expires_after_minutes"] = 3
+        post_data["ivr_retry"] = 1440
+
+        post_data["ivr_retry_failed_events"] = True
+
+        response = self.client.post(reverse("flows.flow_update", args=[voice_flow.pk]), post_data, follow=True)
+        voice_flow.refresh_from_db()
+
+        self.assertEqual(voice_flow.metadata.get("ivr_retry_failed_events"), True)
 
         # update flow triggers, and test if form has expected fields
         post_data = dict()
@@ -4103,7 +4124,7 @@ class ActionPackedTest(FlowFileTest):
 
         # same thing, but with a custom smtp server
         self.org.add_smtp_config(
-            "support@example.com", "smtp.example.com", "support@example.com", "secret", "465", "T", self.admin
+            "support@example.com", "smtp.example.com", "support@example.com", "secret", "465", self.admin
         )
         self.start_flow()
         self.send("email")
@@ -4874,7 +4895,7 @@ class ActionTest(TembaTest):
 
         # same thing, but with a custom smtp server
         self.org.add_smtp_config(
-            "support@example.com", "smtp.example.com", "support@example.com", "secret", "465", "T", self.admin
+            "support@example.com", "smtp.example.com", "support@example.com", "secret", "465", self.admin
         )
         action = EmailAction(str(uuid4()), ["steve@apple.com"], "Subject", "Body")
         self.execute_action(action, run, msg)
@@ -10548,7 +10569,7 @@ class FlowBatchTest(FlowFileTest):
         stopped.stop(self.admin)
 
         # start our flow, this will take two batches
-        with QueryTracker(assert_query_count=194, stack_count=10, skip_unique_queries=True):
+        with QueryTracker(assert_query_count=184, stack_count=10, skip_unique_queries=True):
             flow.start([], contacts)
 
         # ensure 11 flow runs were created
@@ -10685,7 +10706,7 @@ class ExitTest(FlowFileTest):
 
         # update our campaign events
         EventFire.update_campaign_events(campaign)
-        fire = EventFire.objects.get()
+        fire = EventFire.objects.get(event__is_active=True)
 
         # fire it, this will start our second flow
         EventFire.batch_fire([fire], fire.event.flow)
@@ -11349,7 +11370,7 @@ class QueryTest(FlowFileTest):
 
         # mock our webhook call which will get triggered in the flow
         self.mockRequest("GET", "/ip_test", '{"ip":"192.168.1.1"}', content_type="application/json")
-        with QueryTracker(assert_query_count=101, stack_count=10, skip_unique_queries=True):
+        with QueryTracker(assert_query_count=100, stack_count=10, skip_unique_queries=True):
             flow.start([], [self.contact])
 
 

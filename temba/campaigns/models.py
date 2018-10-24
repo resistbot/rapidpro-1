@@ -596,14 +596,10 @@ class EventFire(Model):
         Updates all the scheduled events for each user for the passed in campaign.
         Should be called anytime a campaign changes.
         """
-        from temba.campaigns.tasks import update_event_fires_for_campaign
-
-        on_transaction_commit(lambda: update_event_fires_for_campaign.delay(campaign.pk))
-
-    @classmethod
-    def do_update_campaign_events(cls, campaign):
-        for contact in campaign.group.contacts.exclude(is_test=True):
-            cls.update_campaign_events_for_contact(campaign, contact)
+        for event in campaign.get_events():
+            if EventFire.objects.filter(event=event).exists():
+                event = event.deactivate_and_copy()
+            EventFire.create_eventfires_for_event(event)
 
     @classmethod
     def create_eventfires_for_event(cls, event):
@@ -696,17 +692,15 @@ class EventFire(Model):
                 EventFire.objects.bulk_create(events)
 
     @classmethod
-    def update_events_for_contact(cls, contact):
+    def update_events_for_contact_groups(cls, contact, groups):
         """
         Updates all the events for a contact, across all campaigns.
         Should be called anytime a contact field or contact group membership changes.
         """
-        # remove all pending fires for this contact
-        EventFire.objects.filter(contact=contact, fired=None).delete()
 
         # for each campaign that might affect us
         for campaign in Campaign.objects.filter(
-            group__in=contact.user_groups, org=contact.org, is_active=True, is_archived=False
+            group__in=groups, org=contact.org, is_active=True, is_archived=False
         ).distinct():
             # update all the events for the campaign
             EventFire.update_campaign_events_for_contact(campaign, contact)
@@ -749,8 +743,8 @@ class EventFire(Model):
         # remove any unfired events, they will get recreated below
         EventFire.objects.filter(event__campaign=campaign, contact=contact, fired=None).delete()
 
-        # if we aren't archived
-        if not campaign.is_archived:
+        # if we aren't archived and still in our campaign's group
+        if not campaign.is_archived and contact.user_groups.filter(id__in=[campaign.group.id]).exists():
             # then scheduled all our events
             for event in campaign.get_events():
                 # calculate our scheduled date
