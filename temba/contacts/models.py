@@ -62,6 +62,7 @@ VIBER_SCHEME = "viber"
 FCM_SCHEME = "fcm"
 WHATSAPP_SCHEME = "whatsapp"
 WECHAT_SCHEME = "wechat"
+ZENDESK_SCHEME = "zendesk"
 
 FACEBOOK_PATH_REF_PREFIX = "ref:"
 
@@ -80,6 +81,7 @@ URN_SCHEME_CONFIG = (
     (WECHAT_SCHEME, _("WeChat identifier"), WECHAT_SCHEME),
     (FCM_SCHEME, _("Firebase Cloud Messaging identifier"), FCM_SCHEME),
     (WHATSAPP_SCHEME, _("WhatsApp identifier"), WHATSAPP_SCHEME),
+    (ZENDESK_SCHEME, _("Zendesk identifier"), ZENDESK_SCHEME),
 )
 
 
@@ -340,6 +342,10 @@ class URN(object):
     @classmethod
     def from_fcm(cls, path):
         return cls.from_parts(FCM_SCHEME, path)
+
+    @classmethod
+    def from_zendesk(cls, path):
+        return cls.from_parts(ZENDESK_SCHEME, path)
 
     @classmethod
     def from_jiochat(cls, path):
@@ -2375,6 +2381,7 @@ class ContactURN(models.Model):
         TELEGRAM_SCHEME: 90,
         VIBER_SCHEME: 90,
         FCM_SCHEME: 90,
+        ZENDESK_SCHEME: 90,
     }
 
     ANON_MASK = "*" * 8  # Returned instead of URN values for anon orgs
