@@ -15,7 +15,7 @@ class ZendeskType(ChannelType):
     code = "ZD"
     category = ChannelType.Category.API
 
-    courier_url = r"^abc/(?P<uuid>[a-z0-9\-]+)/receive$"
+    courier_url = r"^zd/(?P<uuid>[a-z0-9\-]+)/receive$"
 
 
 
@@ -40,7 +40,7 @@ class ZendeskType(ChannelType):
     configuration_urls = (
         dict(
             label=_("Receive URL"),
-            url="https://{{ channel.callback_domain }}{% url 'courier.abc' channel.uuid %}",
+            url="https://{{ channel.callback_domain }}{% url 'courier.zd' channel.uuid %}",
             description=_(
                 "POST Zendesk trigger to this address."
             ),

@@ -11,18 +11,18 @@ from ...views import ClaimViewMixin
 
 class ClaimView(ClaimViewMixin, SmartFormView):
     class Form(ClaimViewMixin.Form):
-        title = forms.CharField(required=True, label=_("Apple Business Chat Environment Title"), help_text=_("The name of your environment"))
+        title = forms.CharField(required=True, label=_("Zendesk Environment Title"), help_text=_("The name of your environment"))
 
-        business_id = forms.CharField(
-            required=True, label=_("Apple Business ID"), help_text=_("The business id provided by Apple.")
-        )
-        csp_id = forms.CharField(
-            required=True, label=_("Apple CSP ID"), help_text=_("The CSP id provided by Apple.")
-        )
-        secret_key = forms.CharField(
+        base_url = forms.CharField(
             required=True,
-            label=_("Apple Secret Key"),
-            help_text=_("The secret key provided by apple"),
+            label=_("Zendesk Base URL / Subdomain"),
+            help_text=_("Your zendesk subdomain https://mycompany.zendesk.com"),
+        )
+        username = forms.CharField(
+            required=True, label=_("Zendesk Account Username"), help_text=_("The API user's email address.")
+        )
+        auth_token = forms.CharField(
+            required=True, label=_("Zendesk API Auth Token"), help_text=_("The API auth token.")
         )
 
     form_class = Form
@@ -31,12 +31,12 @@ class ClaimView(ClaimViewMixin, SmartFormView):
         org = self.request.user.get_org()
 
         title = form.cleaned_data.get("title")
-        password = form.cleaned_data.get("password")
         username = form.cleaned_data.get("username")
+        auth_token = form.cleaned_data.get("auth_token")
         base_url = form.cleaned_data.get("base_url")
         config = {
             Channel.CONFIG_USERNAME: username,
-            Channel.CONFIG_PASSWORD: password,
+            Channel.CONFIG_AUTH_TOKEN: auth_token,
             Channel.CONFIG_BASE_URL: base_url,
         }
 
