@@ -1,8 +1,6 @@
 from datetime import timedelta
+from unittest.mock import patch
 from urllib.parse import parse_qs
-from uuid import uuid4
-
-from mock import patch
 
 from django.conf import settings
 from django.contrib.auth.models import Group
@@ -11,14 +9,12 @@ from django.urls import reverse
 from django.utils import timezone
 
 from temba.api.models import APIToken, WebHookEvent, WebHookResult
-from temba.api.tasks import trim_webhook_event_task
+from temba.api.tasks import retry_events_task, trim_webhook_event_task
 from temba.channels.models import ChannelEvent, SyncEvent
 from temba.contacts.models import TEL_SCHEME, Contact
-from temba.flows.models import ActionSet, Flow, WebhookAction
 from temba.msgs.models import FAILED, Broadcast
 from temba.orgs.models import ALL_EVENTS
-from temba.tests import MockResponse, TembaTest, matchers
-from temba.utils import json
+from temba.tests import MockResponse, TembaTest
 
 
 class APITokenTest(TembaTest):
@@ -148,10 +144,8 @@ class WebHookTest(TembaTest):
             self.assertFalse(event.next_attempt)
 
             result = WebHookResult.objects.get()
-            self.assertIn("Event delivered successfully", result.message)
-            self.assertIn("not JSON", result.message)
             self.assertEqual(200, result.status_code)
-            self.assertEqual("Hello World", result.body)
+            self.assertEqual("Hello World", result.response)
 
             self.assertTrue(mock.called)
             args = mock.call_args_list[0][0]
@@ -209,9 +203,8 @@ class WebHookTest(TembaTest):
             self.assertFalse(event.next_attempt)
 
             result = WebHookResult.objects.get()
-            self.assertIn("Event delivered successfully", result.message)
             self.assertEqual(200, result.status_code)
-            self.assertEqual("", result.body)
+            self.assertEqual("", result.response)
 
             self.assertTrue(mock.called)
             args = mock.call_args_list[0][0]
@@ -226,82 +219,6 @@ class WebHookTest(TembaTest):
             self.assertEqual("WIFI", data["network_type"][0])
             self.assertEqual(5, int(data["pending_message_count"][0]))
             self.assertEqual(4, int(data["retry_message_count"][0]))
-
-    @patch("requests.Session.send")
-    def test_flow_event(self, mock_send):
-        self.setupChannel()
-
-        org = self.channel.org
-        org.save()
-
-        flow = self.get_flow("color")
-
-        # replace our uuid of 4 with the right thing
-        actionset = ActionSet.objects.get(x=4)
-        actionset.actions = [WebhookAction(str(uuid4()), org.get_webhook_url()).as_json()]
-        actionset.save()
-
-        # run a user through this flow
-        flow.start([], [self.joe])
-
-        # have joe reply with mauve, which will put him in the other category that triggers the API Action
-        sms = self.create_msg(
-            contact=self.joe,
-            direction="I",
-            status="H",
-            text="Mauve",
-            attachments=["image/jpeg:http://s3.com/text.jpg", "audio/mp4:http://s3.com/text.mp4"],
-        )
-
-        mock_send.return_value = MockResponse(200, "{}")
-        Flow.find_and_handle(sms)
-
-        # should have one event created
-        event = WebHookEvent.objects.get()
-
-        self.assertEqual("C", event.status)
-        self.assertEqual(1, event.try_count)
-        self.assertFalse(event.next_attempt)
-
-        result = WebHookResult.objects.get()
-        self.assertIn("successfully", result.message)
-        self.assertEqual(200, result.status_code)
-        self.assertEqual(self.joe, result.contact)
-
-        self.assertTrue(mock_send.called)
-
-        args = mock_send.call_args_list[0][0]
-        prepared_request = args[0]
-        self.assertIn(self.channel.org.get_webhook_url(), prepared_request.url)
-
-        data = json.loads(prepared_request.body)
-
-        self.assertEqual(data["channel"], {"uuid": str(self.channel.uuid), "name": self.channel.name})
-        self.assertEqual(
-            data["contact"], {"uuid": str(self.joe.uuid), "name": self.joe.name, "urn": str(self.joe.get_urn("tel"))}
-        )
-        self.assertEqual(data["flow"], {"uuid": str(flow.uuid), "name": flow.name, "revision": 1})
-        self.assertEqual(
-            data["input"],
-            {
-                "urn": "tel:+250788123123",
-                "text": "Mauve",
-                "attachments": ["image/jpeg:http://s3.com/text.jpg", "audio/mp4:http://s3.com/text.mp4"],
-            },
-        )
-        self.assertEqual(
-            data["results"],
-            {
-                "color": {
-                    "category": "Other",
-                    "node_uuid": matchers.UUID4String(),
-                    "name": "color",
-                    "value": "Mauve\nhttp://s3.com/text.jpg\nhttp://s3.com/text.mp4",
-                    "created_on": matchers.ISODate(),
-                    "input": "Mauve\nhttp://s3.com/text.jpg\nhttp://s3.com/text.mp4",
-                }
-            },
-        )
 
     @patch("requests.Session.send")
     def test_webhook_first(self, mock_send):
@@ -347,13 +264,45 @@ class WebHookTest(TembaTest):
             self.assertFalse(event.next_attempt)
 
             result = WebHookResult.objects.get()
-            self.assertIn("Event delivered successfully", result.message)
-            self.assertIn("not JSON", result.message)
             self.assertEqual(200, result.status_code)
             self.assertEqual(result.request_time, 5000)
 
             self.assertTrue(mock_time.called)
             self.assertTrue(mock.called)
+
+    def test_webhook_retry_task(self):
+        sms = self.create_msg(contact=self.joe, direction="I", status="H", text="I'm gonna pop some tags")
+        self.setupChannel()
+        now = timezone.now()
+
+        with patch("requests.Session.send") as mock:
+            mock.return_value = MockResponse(200, "Hello World")
+
+            # trigger an event
+            WebHookEvent.trigger_sms_event(WebHookEvent.TYPE_SMS_RECEIVED, sms, now)
+            event = WebHookEvent.objects.get()
+
+            # mark it as errored with a retry in the past
+            event.status = WebHookEvent.STATUS_ERRORED
+            event.next_attempt = timezone.now()
+            event.save(update_fields=["next_attempt", "status"])
+            retry_events_task()
+            self.assertEqual(2, mock.call_count)
+
+            # mark it as pending more than five minutes ago
+            event.status = WebHookEvent.STATUS_PENDING
+            event.created_on = timezone.now() - timedelta(minutes=6)
+            event.next_attempt = None
+            event.save(update_fields=["created_on", "status", "next_attempt"])
+            retry_events_task()
+            self.assertEqual(3, mock.call_count)
+
+            # mark it as errored and created hours hour ago
+            event.status = WebHookEvent.STATUS_ERRORED
+            event.created_on = timezone.now() - timedelta(hours=2)
+            event.save(update_fields=["created_on", "status"])
+            retry_events_task()
+            self.assertEqual(4, mock.call_count)
 
     def test_webhook_event_trim_task(self):
         sms = self.create_msg(contact=self.joe, direction="I", status="H", text="I'm gonna pop some tags")
@@ -370,6 +319,7 @@ class WebHookTest(TembaTest):
             five_hours_ago = timezone.now() - timedelta(hours=5)
             event.created_on = five_hours_ago
             event.save()
+            WebHookResult.objects.all().update(created_on=five_hours_ago)
 
             with override_settings(SUCCESS_LOGS_TRIM_TIME=0):
                 trim_webhook_event_task()
@@ -393,6 +343,7 @@ class WebHookTest(TembaTest):
             event.created_on = five_hours_ago
             event.status = FAILED
             event.save()
+            WebHookResult.objects.all().update(status_code=401, created_on=five_hours_ago)
 
             with override_settings(ALL_LOGS_TRIM_TIME=0):
                 trim_webhook_event_task()
@@ -453,13 +404,13 @@ class WebHookTest(TembaTest):
             self.assertFalse(event.next_attempt)
 
             result = WebHookResult.objects.get()
-            self.assertIn("No active user", result.message)
             self.assertEqual(0, result.status_code)
 
             self.assertFalse(mock.called)
 
             # what if they send weird json back?
             self.release(WebHookEvent.objects.all())
+            self.release(WebHookResult.objects.all())
 
         # add ad manager back in
         self.org.administrators.add(self.admin)
@@ -477,13 +428,12 @@ class WebHookTest(TembaTest):
             self.assertFalse(event.next_attempt)
 
             result = WebHookResult.objects.get()
-            self.assertIn("Event delivered successfully", result.message)
-            self.assertIn("not JSON", result.message)
             self.assertEqual(200, result.status_code)
 
             self.assertTrue(mock.called)
 
             self.release(WebHookEvent.objects.all())
+            self.release(WebHookResult.objects.all())
 
         with patch("requests.Session.send") as mock:
             mock.side_effect = [MockResponse(500, "I am error")]
@@ -508,6 +458,7 @@ class WebHookTest(TembaTest):
             self.assertEqual(mock.call_count, 2)
 
             self.release(WebHookEvent.objects.all())
+            self.release(WebHookResult.objects.all())
 
         with patch("requests.Session.send") as mock:
             # valid json, but not our format
@@ -524,12 +475,11 @@ class WebHookTest(TembaTest):
             self.assertTrue(mock.called)
 
             result = WebHookResult.objects.get()
-            self.assertIn("Event delivered successfully", result.message)
-            self.assertIn("ignoring", result.message)
             self.assertEqual(200, result.status_code)
-            self.assertEqual(bad_json, result.body)
+            self.assertEqual(bad_json, result.response)
 
             self.release(WebHookEvent.objects.all())
+            self.release(WebHookResult.objects.all())
 
         with patch("requests.Session.send") as mock:
             mock.return_value = MockResponse(200, '{ "phone": "+250788123123", "text": "I am success" }')
@@ -568,6 +518,7 @@ class WebHookTest(TembaTest):
             self.assertIn("time", data)
 
             self.release(WebHookEvent.objects.all())
+            self.release(WebHookResult.objects.all())
 
         with patch("requests.Session.send") as mock:
             mock.return_value = MockResponse(500, "I am error")
@@ -584,9 +535,8 @@ class WebHookTest(TembaTest):
             self.assertTrue(next_attempt_earliest < event.next_attempt and next_attempt_latest > event.next_attempt)
 
             result = WebHookResult.objects.get()
-            self.assertIn("Error", result.message)
             self.assertEqual(500, result.status_code)
-            self.assertEqual("I am error", result.body)
+            self.assertEqual("I am error", result.response)
 
             # make sure things become failures after three retries
             event.try_count = 2
@@ -600,20 +550,28 @@ class WebHookTest(TembaTest):
             self.assertFalse(event.next_attempt)
 
             result = WebHookResult.objects.get()
-            self.assertIn("Error", result.message)
             self.assertEqual(500, result.status_code)
-            self.assertEqual("I am error", result.body)
+            self.assertEqual("I am error", result.response)
             self.assertEqual("http://fake.com/webhook.php", result.url)
-            self.assertTrue(result.data.find("pop+some+tags") > 0)
+            self.assertTrue(result.request.find("pop+some+tags") > 0)
 
             # check out our api log
-            response = self.client.get(reverse("api.log"))
+            response = self.client.get(reverse("api.webhookresult_list"))
             self.assertRedirect(response, reverse("users.user_login"))
 
-            response = self.client.get(reverse("api.log_read", args=[event.pk]))
+            response = self.client.get(reverse("api.webhookresult_read", args=[event.pk]))
             self.assertRedirect(response, reverse("users.user_login"))
+
+            self.login(self.admin)
+
+            response = self.client.get(reverse("api.webhookresult_list"))
+            self.assertContains(response, "http://fake.com/webhook.php")
+
+            response = self.client.get(reverse("api.webhookresult_read", args=[result.pk]))
+            self.assertContains(response, "http://fake.com/webhook.php")
 
             self.release(WebHookEvent.objects.all())
+            self.release(WebHookResult.objects.all())
 
         # add a webhook header to the org
         self.channel.org.webhook = {

@@ -17,6 +17,11 @@ class PublicTest(SmartminTest):
         response = self.client.get(home_url, follow=True)
         self.assertEqual(response.request["PATH_INFO"], "/")
 
+        response = self.client.get(home_url + "?errors=&foo", follow=True)
+        self.assertEqual(response.request["PATH_INFO"], "/")
+        self.assertTrue(response.context["errors"])
+        self.assertFalse("error_msg" in response.context)
+
         # try to create a lead from the homepage
         lead_create_url = reverse("public.lead_create")
         post_data = dict()
@@ -92,23 +97,23 @@ class PublicTest(SmartminTest):
         self.assertEqual(response.request["PATH_INFO"], status_url)
         self.assertContains(response, "Cancelled")
 
-        response = self.client.post(status_url, {}, follow=True)
+        response = self.client.post(status_url, {}, content_type="application/json", follow=True)
         self.assertEqual(response.request["PATH_INFO"], status_url)
         self.assertContains(response, "Invalid")
 
-        response = self.client.post(status_url, dict(text="somethinginvalid"))
+        response = self.client.post(status_url, dict(text="somethinginvalid"), content_type="application/json")
         self.assertEqual(response.request["PATH_INFO"], status_url)
         self.assertContains(response, "Invalid")
 
-        response = self.client.post(status_url, dict(text="CU001"))
+        response = self.client.post(status_url, dict(input=dict(text="CU001")), content_type="application/json")
         self.assertEqual(response.request["PATH_INFO"], status_url)
         self.assertContains(response, "Shipped")
 
-        response = self.client.post(status_url, dict(text="CU002"))
+        response = self.client.post(status_url, dict(input=dict(text="CU002")), content_type="application/json")
         self.assertEqual(response.request["PATH_INFO"], status_url)
         self.assertContains(response, "Pending")
 
-        response = self.client.post(status_url, dict(text="CU003"))
+        response = self.client.post(status_url, dict(input=dict(text="CU003")), content_type="application/json")
         self.assertEqual(response.request["PATH_INFO"], status_url)
         self.assertContains(response, "Cancelled")
 

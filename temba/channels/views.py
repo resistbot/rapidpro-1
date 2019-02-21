@@ -1,13 +1,16 @@
 import base64
 import hashlib
 import hmac
+import logging
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta
 
+import nexmo
 import phonenumbers
 import pytz
 import requests
+import twilio.base.exceptions
 from django_countries.data import COUNTRIES
 from smartmin.views import (
     SmartCRUDL,
@@ -27,6 +30,7 @@ from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.db.models import Count, Sum
 from django.http import Http404, HttpResponse, HttpResponseRedirect, JsonResponse
+from django.shortcuts import get_object_or_404
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.encoding import force_bytes, force_text
@@ -34,7 +38,6 @@ from django.utils.http import urlencode
 from django.utils.translation import ugettext_lazy as _
 from django.views.decorators.csrf import csrf_exempt
 
-from temba.channels.models import ChannelSession
 from temba.contacts.models import TEL_SCHEME, URN, ContactURN
 from temba.msgs.models import OUTGOING, PENDING, QUEUED, WIRED, Msg, SystemLabel
 from temba.msgs.views import InboxView
@@ -43,7 +46,9 @@ from temba.orgs.views import AnonMixin, ModalMixin, OrgObjPermsMixin, OrgPermsMi
 from temba.utils import analytics, json
 from temba.utils.http import http_headers
 
-from .models import Alert, Channel, ChannelCount, ChannelEvent, ChannelLog, SyncEvent
+from .models import Alert, Channel, ChannelConnection, ChannelCount, ChannelEvent, ChannelLog, SyncEvent
+
+logger = logging.getLogger(__name__)
 
 COUNTRIES_NAMES = {key: value for key, value in COUNTRIES.items()}
 COUNTRIES_NAMES["GB"] = _("United Kingdom")
@@ -97,8 +102,8 @@ COUNTRY_CALLING_CODES = {
     "TD": (235,),  # Chad
     "CL": (56,),  # Chile
     "CN": (86,),  # China
-    "CX": (6189164,),  # Christmas Island
-    "CC": (6189162,),  # Cocos (Keeling) Islands
+    "CX": (6_189_164,),  # Christmas Island
+    "CC": (6_189_162,),  # Cocos (Keeling) Islands
     "CO": (57,),  # Colombia
     "KM": (269,),  # Comoros
     "CD": (243,),  # Congo (the Democratic Republic of the)
@@ -142,13 +147,13 @@ COUNTRY_CALLING_CODES = {
     "GP": (590,),  # Guadeloupe
     "GU": (1671,),  # Guam
     "GT": (502,),  # Guatemala
-    "GG": (441481, 447781, 447839, 447911),  # Guernsey
+    "GG": (441_481, 447_781, 447_839, 447_911),  # Guernsey
     "GN": (224,),  # Guinea
     "GW": (245,),  # Guinea-Bissau
     "GY": (592,),  # Guyana
     "HT": (509,),  # Haiti
     "HM": (),  # Heard Island and McDonald Islands
-    "VA": (379, 3906698),  # Holy See
+    "VA": (379, 3_906_698),  # Holy See
     "HN": (504,),  # Honduras
     "HK": (852,),  # Hong Kong
     "HU": (36,),  # Hungary
@@ -158,12 +163,12 @@ COUNTRY_CALLING_CODES = {
     "IR": (98,),  # Iran (Islamic Republic of)
     "IQ": (964,),  # Iraq
     "IE": (353,),  # Ireland
-    "IM": (441624, 447524, 447624, 447924),  # Isle of Man
+    "IM": (441_624, 447_524, 447_624, 447_924),  # Isle of Man
     "IL": (972,),  # Israel
     "IT": (39,),  # Italy
     "JM": (1876,),  # Jamaica
     "JP": (81,),  # Japan
-    "JE": (441534,),  # Jersey
+    "JE": (441_534,),  # Jersey
     "JO": (962,),  # Jordan
     "KZ": (76, 77),  # Kazakhstan
     "KE": (254,),  # Kenya
@@ -193,7 +198,7 @@ COUNTRY_CALLING_CODES = {
     "MQ": (596,),  # Martinique
     "MR": (222,),  # Mauritania
     "MU": (230,),  # Mauritius
-    "YT": (262269, 262639),  # Mayotte
+    "YT": (262_269, 262_639),  # Mayotte
     "MX": (52,),  # Mexico
     "FM": (691,),  # Micronesia (Federated States of)
     "MD": (373,),  # Moldova (the Republic of)
@@ -501,12 +506,10 @@ def channel_status_processor(request):
         cutoff = timezone.now() - timedelta(hours=1)
         send_channel = org.get_send_channel()
         call_channel = org.get_call_channel()
-        ussd_channel = org.get_ussd_channel()
 
         status["send_channel"] = send_channel
         status["call_channel"] = call_channel
-        status["has_outgoing_channel"] = send_channel or call_channel or ussd_channel
-        status["is_ussd_channel"] = True if ussd_channel else False
+        status["has_outgoing_channel"] = send_channel or call_channel
 
         channels = org.channels.filter(is_active=True)
         for channel in channels:
@@ -534,8 +537,9 @@ def get_commands(channel, commands, sync_event=None):
     """
     Generates sync commands for all queued messages on the given channel
     """
-    msgs = Msg.objects.filter(status__in=(PENDING, QUEUED, WIRED), channel=channel, direction=OUTGOING)
-    msgs = msgs.exclude(contact__is_test=True).exclude(topup=None)
+    msgs = Msg.objects.filter(status__in=(PENDING, QUEUED, WIRED), channel=channel, direction=OUTGOING).exclude(
+        topup=None
+    )
 
     if sync_event:
         pending_msgs = sync_event.get_pending_messages()
@@ -665,28 +669,16 @@ def sync(request, channel_id):
                                 pass
                         handled = True
 
-                    elif keyword == "gcm":
-                        gcm_id = cmd.get("gcm_id", None)
-                        uuid = cmd.get("uuid", None)
-                        if channel.gcm_id != gcm_id or channel.uuid != uuid:
-                            channel.gcm_id = gcm_id
-                            channel.uuid = uuid
-                            channel.save(update_fields=["gcm_id", "uuid"])
-
-                        # no acking the gcm
-                        handled = False
-
                     elif keyword == "fcm":
                         # update our fcm and uuid
 
-                        channel.gcm_id = None
                         config = channel.config
                         config.update({Channel.CONFIG_FCM_ID: cmd["fcm_id"]})
                         channel.config = config
                         channel.uuid = cmd.get("uuid", None)
-                        channel.save(update_fields=["uuid", "config", "gcm_id"])
+                        channel.save(update_fields=["uuid", "config"])
 
-                        # no acking the gcm
+                        # no acking the fcm
                         handled = False
 
                     elif keyword == "reset":
@@ -1043,6 +1035,8 @@ class BaseClaimNumberMixin(ClaimViewMixin):
             )
             return self.form_invalid(form)
 
+        error_message = None
+
         # try to claim the number
         try:
             role = Channel.ROLE_CALL + Channel.ROLE_ANSWER
@@ -1052,19 +1046,31 @@ class BaseClaimNumberMixin(ClaimViewMixin):
             self.remove_api_credentials_from_session()
 
             return HttpResponseRedirect("%s?success" % reverse("public.public_welcome"))
-        except Exception as e:  # pragma: needs cover
-            import traceback
 
-            traceback.print_exc()
+        except (
+            nexmo.AuthenticationError,
+            nexmo.ClientError,
+            twilio.base.exceptions.TwilioRestException,
+        ) as e:  # pragma: no cover
+            logger.warning(f"Unable to claim a number: {str(e)}", exc_info=True)
+            error_message = form.error_class([str(e)])
+
+        except Exception as e:  # pragma: needs cover
+            logger.error(f"Unable to claim a number: {str(e)}", exc_info=True)
+
             message = str(e)
             if message:
-                form._errors["phone_number"] = form.error_class([message])
+                error_message = form.error_class([message])
             else:
-                form._errors["phone_number"] = _(
+                error_message = _(
                     "An error occurred connecting your Twilio number, try removing your "
                     "Twilio account, reconnecting it and trying again."
                 )
-            return self.form_invalid(form)
+
+        if error_message is not None:
+            form._errors["phone_number"] = error_message
+
+        return self.form_invalid(form)
 
 
 class ClaimAndroidForm(forms.Form):
@@ -1176,7 +1182,7 @@ class ChannelCRUDL(SmartCRUDL):
 
     class Read(OrgObjPermsMixin, SmartReadView):
         slug_url_kwarg = "uuid"
-        exclude = ("id", "is_active", "created_by", "modified_by", "modified_on", "gcm_id")
+        exclude = ("id", "is_active", "created_by", "modified_by", "modified_on")
 
         def get_queryset(self):
             return Channel.objects.filter(is_active=True)
@@ -1487,10 +1493,9 @@ class ChannelCRUDL(SmartCRUDL):
                 )
                 return HttpResponseRedirect(reverse("orgs.org_home"))
 
-            except Exception as e:  # pragma: no cover
-                import traceback
+            except Exception:  # pragma: no cover
+                logger.error("Error removing a channel", exc_info=True)
 
-                traceback.print_exc()
                 messages.error(request, _("We encountered an error removing your channel, please try again later."))
                 return HttpResponseRedirect(reverse("channels.channel_read", args=[channel.uuid]))
 
@@ -1967,30 +1972,37 @@ class ChannelEventCRUDL(SmartCRUDL):
 
 class ChannelLogCRUDL(SmartCRUDL):
     model = ChannelLog
-    actions = ("list", "read", "session")
+    actions = ("list", "read", "connection")
 
     class List(OrgPermsMixin, SmartListView):
         fields = ("channel", "description", "created_on")
         link_fields = ("channel", "description", "created_on")
         paginate_by = 50
 
+        @classmethod
+        def derive_url_pattern(cls, path, action):
+            return r"^%s/(?P<channel_uuid>[^/]+)/$" % path
+
+        def derive_channel(self):
+            return get_object_or_404(Channel, uuid=self.kwargs["channel_uuid"])
+
         def derive_org(self):
-            channel = Channel.objects.get(pk=self.request.GET["channel"])
+            channel = self.derive_channel()
             return channel.org
 
         def derive_queryset(self, **kwargs):
-            channel = Channel.objects.get(pk=self.request.GET["channel"])
+            channel = self.derive_channel()
 
-            if self.request.GET.get("sessions"):
+            if self.request.GET.get("connections"):
                 logs = (
                     ChannelLog.objects.filter(channel=channel)
                     .exclude(connection=None)
                     .values_list("connection_id", flat=True)
                 )
-                events = ChannelSession.objects.filter(id__in=logs).order_by("-created_on")
+                events = ChannelConnection.objects.filter(id__in=logs).order_by("-created_on")
 
                 if self.request.GET.get("errors"):
-                    events = events.filter(status=ChannelSession.FAILED)
+                    events = events.filter(status=ChannelConnection.FAILED)
 
             elif self.request.GET.get("others"):
                 events = ChannelLog.objects.filter(channel=channel, connection=None, msg=None).order_by("-created_on")
@@ -2008,11 +2020,11 @@ class ChannelLogCRUDL(SmartCRUDL):
 
         def get_context_data(self, **kwargs):
             context = super().get_context_data(**kwargs)
-            context["channel"] = Channel.objects.get(pk=self.request.GET["channel"])
+            context["channel"] = self.derive_channel()
             return context
 
-    class Session(AnonMixin, OrgPermsMixin, SmartReadView):
-        model = ChannelSession
+    class Connection(AnonMixin, OrgPermsMixin, SmartReadView):
+        model = ChannelConnection
 
     class Read(AnonMixin, OrgPermsMixin, SmartReadView):
         fields = ("description", "created_on")

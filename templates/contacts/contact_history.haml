@@ -42,7 +42,9 @@
       -elif item.type == 'channel-event'
         -with item.obj as event
           -if event.event_type == 'mt_miss'
-            -trans "Missed call"
+            -trans "Missed outgoing call"
+          -if event.event_type == 'mo_miss'
+            -trans "Missed incoming call"
           -elif event.event_type == 'new_conversation'
             -trans "Started Conversation"
           -elif event.event_type == 'referral'
@@ -51,8 +53,11 @@
             -trans "Followed"
           -elif event.event_type == 'stop_contact'
             -trans "Stopped"
-          -elif event.event_type == 'mt_call' or event.event_type == 'mt_miss' or event.event_type == 'mo_call' or event.event_type == 'mo_miss'
-            -trans "Phone call"
+          -elif event.event_type == 'mt_call'
+            -trans "Outgoing Phone Call"
+            ({{event.extra.duration|format_seconds}})
+          -elif event.event_type == 'mo_call'
+            -trans "Incoming Phone call"
             ({{event.extra.duration|format_seconds}})
           -else
             -trans "Unknown/Unsupported"
@@ -100,9 +105,9 @@
     %td.created_on
       %span.time
         %span.short
-          {{item.time|gmail_time}}
+          {% short_datetime item.time %}
         %span.long.hide
-          {{item.time}}
+          {% pretty_datetime item.time %}
 
       .log-icon
         -if not user_org.is_anon or perms.contacts.contact_break_anon
@@ -116,9 +121,8 @@
                   .icon-docs-2
 
           -if item.type == 'webhook-result'
-            -with item.obj.event as event
-              %a{href:"{%url 'api.log_read' event.id %}"}
-                .icon-docs-2
+            %a{href:"{%url 'api.webhookresult_read' item.obj.id %}"}
+              .icon-docs-2
 
 -if has_older and not recent_only
   %tr{ ic-append-from:"/contact/history/{{contact.uuid}}/?after={{after}}&before={{before}}", 

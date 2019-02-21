@@ -126,6 +126,10 @@ class ContactGroupForm(forms.ModelForm):
     def clean_query(self):
         try:
             parsed_query = parse_query(text=self.cleaned_data["query"], as_anon=self.org.is_anon)
+
+            # try to prepare query as it would be used, might raise errors for invalid search operators
+            parsed_query.as_elasticsearch(self.org)
+
             cleaned_query = parsed_query.as_text()
 
             if (
@@ -141,8 +145,7 @@ class ContactGroupForm(forms.ModelForm):
                 raise forms.ValidationError(_('You cannot create a dynamic group based on "name" or "id".'))
         except forms.ValidationError as e:
             raise e
-
-        except Exception as e:
+        except SearchException as e:
             raise forms.ValidationError(str(e))
 
     class Meta:
@@ -254,13 +257,7 @@ class ContactListView(ContactListPaginationMixin, OrgPermsMixin, SmartListView):
                 return Contact.objects.none()
         else:
             # if user search is not defined, use DB to select contacts
-            test_contact_ids = Contact.objects.filter(org=org, is_test=True).values_list("id", flat=True)
-            return (
-                group.contacts.all()
-                .exclude(id__in=test_contact_ids)
-                .order_by("-id")
-                .prefetch_related("org", "all_groups")
-            )
+            return group.contacts.all().order_by("-id").prefetch_related("org", "all_groups")
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
@@ -956,7 +953,6 @@ class ContactCRUDL(SmartCRUDL):
 
         def get_queryset(self, **kwargs):
             org = self.derive_org()
-
             return omnibox_query(org, **{k: v for k, v in self.request.GET.items()})
 
         def render_to_response(self, context, **response_kwargs):
@@ -964,7 +960,7 @@ class ContactCRUDL(SmartCRUDL):
             page = context["page_obj"]
             object_list = context["object_list"]
 
-            results = omnibox_results_to_dict(org, object_list)
+            results = omnibox_results_to_dict(org, object_list, self.request.GET.get("v", "1"))
 
             json_result = {"results": results, "more": page.has_next(), "total": len(results), "err": "nil"}
 
@@ -978,7 +974,7 @@ class ContactCRUDL(SmartCRUDL):
             return self.object.get_display()
 
         def get_queryset(self):
-            return Contact.objects.filter(is_active=True, is_test=False)
+            return Contact.objects.filter(is_active=True)
 
         def get_context_data(self, **kwargs):
             context = super().get_context_data(**kwargs)
@@ -1133,7 +1129,7 @@ class ContactCRUDL(SmartCRUDL):
         slug_url_kwarg = "uuid"
 
         def get_queryset(self):
-            return Contact.objects.filter(is_active=True, is_test=False)
+            return Contact.objects.filter(is_active=True)
 
         def get_context_data(self, *args, **kwargs):
             context = super().get_context_data(*args, **kwargs)
@@ -1344,10 +1340,6 @@ class ContactCRUDL(SmartCRUDL):
         success_url = "uuid@contacts.contact_read"
         success_message = ""
         submit_button_name = _("Save Changes")
-
-        def derive_queryset(self):
-            qs = super().derive_queryset()
-            return qs.filter(is_test=False)
 
         def derive_exclude(self):
             obj = self.get_object()
@@ -1591,7 +1583,11 @@ class ContactGroupCRUDL(SmartCRUDL):
 
         def get_context_data(self, **kwargs):
             context = super().get_context_data(**kwargs)
-            context["triggers"] = self.get_object().trigger_set.filter(is_archived=False)
+            group = self.get_object()
+
+            context["triggers"] = group.trigger_set.filter(is_archived=False)
+            context["campaigns"] = group.campaign_set.filter(is_archived=False)
+
             return context
 
         def get_success_url(self):
@@ -1606,10 +1602,14 @@ class ContactGroupCRUDL(SmartCRUDL):
             triggers = group.trigger_set.filter(is_archived=False)
             if triggers.count() > 0:
                 return HttpResponseRedirect(smart_url(self.cancel_url, group))
+
             from temba.flows.models import Flow
 
             flows = Flow.objects.filter(org=group.org, group_dependencies__in=[group])
             if flows.count():
+                return HttpResponseRedirect(smart_url(self.cancel_url, group))
+
+            if group.campaign_set.filter(is_archived=False).exists():
                 return HttpResponseRedirect(smart_url(self.cancel_url, group))
 
             # deactivate the group, this makes it 'invisible'

@@ -8,6 +8,7 @@ from functools import cmp_to_key
 from urllib.parse import parse_qs, unquote, urlparse
 
 import nexmo
+import pytz
 import requests
 from smartmin.views import (
     SmartCreateView,
@@ -63,6 +64,7 @@ from .models import (
     CHATBASE_VERSION,
     MO_CALL_EVENTS,
     MO_SMS_EVENTS,
+    MONTHFIRST,
     MT_CALL_EVENTS,
     MT_SMS_EVENTS,
     NEXMO_KEY,
@@ -666,6 +668,10 @@ class OrgCRUDL(SmartCRUDL):
             context["archived"] = include_archived
             context["buckets"] = buckets
             context["singles"] = singles
+
+            context["flow_id"] = int(self.request.GET.get("flow", 0))
+            context["campaign_id"] = int(self.request.GET.get("campaign", 0))
+
             return context
 
         def generate_export_buckets(self, org, include_archived):
@@ -1254,10 +1260,17 @@ class OrgCRUDL(SmartCRUDL):
                 return HttpResponseRedirect(self.get_success_url())
             return super().post(request, *args, **kwargs)
 
+        def pre_save(self, obj):
+            # figure out what our previous value was
+            obj.was_flow_server_enabled = Org.objects.get(id=obj.id).flow_server_enabled
+            return super().pre_save(obj)
+
         def post_save(self, obj):
-            # make sure all our flows have flow server enabled according to the org settings
-            if obj.flow_server_enabled:
-                obj.flows.update(flow_server_enabled=True)
+            # if we are being changed to flow server enabled, do so
+            if not obj.was_flow_server_enabled and obj.flow_server_enabled:
+                obj.enable_flow_server()
+
+            return super().post_save(obj)
 
     class Accounts(InferOrgMixin, OrgPermsMixin, SmartUpdateView):
         class PasswordForm(forms.ModelForm):
@@ -1936,8 +1949,12 @@ class OrgCRUDL(SmartCRUDL):
 
                 surveyors_group = Group.objects.get(name="Surveyors")
                 token = APIToken.get_or_create(org, user, role=surveyors_group)
-                response = dict(url=self.get_success_url(), token=token, user=username, org=org.name)
-                return HttpResponseRedirect("%(url)s?org=%(org)s&token=%(token)s&user=%(user)s" % response)
+
+                org_name = urlquote(org.name)
+
+                return HttpResponseRedirect(
+                    f"{self.get_success_url()}?org={org_name}&uuid={str(org.uuid)}&token={token}&user={username}"
+                )
 
         def form_invalid(self, form):
             return super().form_invalid(form)
@@ -1997,6 +2014,10 @@ class OrgCRUDL(SmartCRUDL):
             slug = Org.get_unique_slug(self.form.cleaned_data["name"])
             obj.slug = slug
             obj.brand = self.request.branding.get("host", settings.DEFAULT_BRAND)
+
+            if obj.timezone.zone in pytz.country_timezones("US"):
+                obj.date_format = MONTHFIRST
+
             return obj
 
         def get_welcome_size(self):  # pragma: needs cover

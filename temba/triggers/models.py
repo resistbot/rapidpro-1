@@ -1,4 +1,3 @@
-import regex
 from smartmin.models import SmartModel
 from temba_expressions.utils import tokenize
 
@@ -447,32 +446,6 @@ class Trigger(SmartModel):
         return trigger.flow
 
     @classmethod
-    def find_trigger_for_ussd_session(cls, contact, starcode):
-        # Determine keyword from starcode
-        matched_object = regex.match("(^\*[\d\*]+\#)((?:\d+\#)*)$", starcode)
-        if matched_object:
-            keyword = matched_object.group(1)
-        else:
-            return None
-
-        matching = Trigger.objects.filter(
-            is_archived=False,
-            is_active=True,
-            org=contact.org,
-            keyword__iexact=keyword,
-            trigger_type=Trigger.TYPE_USSD_PULL,
-            flow__is_archived=False,
-            flow__is_active=True,
-            groups=None,
-        )
-
-        if not matching:
-            return None
-
-        trigger = matching.first()
-        return trigger
-
-    @classmethod
     def apply_action_archive(cls, user, triggers):
         for trigger in triggers:
             trigger.archive(user)
@@ -517,7 +490,7 @@ class Trigger(SmartModel):
             return
 
         # for single contacts, we just start directly
-        if not groups and contacts:
+        if not groups and contacts and not self.flow.flow_server_enabled:
             self.flow.start(groups, contacts, restart_participants=True)
 
         # we have groups of contacts to start, create a flow start

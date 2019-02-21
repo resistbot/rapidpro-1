@@ -9,7 +9,7 @@ from temba.channels.models import Channel, ChannelEvent
 from temba.contacts.models import Contact, ContactField, ContactGroup
 from temba.flows.models import Flow, FlowRun, FlowStart
 from temba.locations.models import AdminBoundary
-from temba.msgs.models import PENDING, QUEUED, Broadcast, Label, Msg
+from temba.msgs.models import ERRORED, FAILED, INITIALIZING, PENDING, QUEUED, SENT, Broadcast, Label, Msg
 from temba.msgs.tasks import send_broadcast_task
 from temba.utils import extract_constants, json, on_transaction_commit
 from temba.values.constants import Value
@@ -104,11 +104,17 @@ class ArchiveReadSerializer(ReadSerializer):
 
 
 class BroadcastReadSerializer(ReadSerializer):
+    STATUS_MAP = {INITIALIZING: QUEUED, PENDING: QUEUED, ERRORED: QUEUED, QUEUED: QUEUED, FAILED: FAILED}
+
     text = fields.TranslatableField()
+    status = serializers.SerializerMethodField()
     urns = serializers.SerializerMethodField()
     contacts = fields.ContactField(many=True)
     groups = fields.ContactGroupField(many=True)
     created_on = serializers.DateTimeField(default_timezone=pytz.UTC)
+
+    def get_status(self, obj):
+        return Msg.STATUSES.get(self.STATUS_MAP.get(obj.status, SENT))
 
     def get_urns(self, obj):
         if self.context["org"].is_anon:
@@ -118,7 +124,7 @@ class BroadcastReadSerializer(ReadSerializer):
 
     class Meta:
         model = Broadcast
-        fields = ("id", "urns", "contacts", "groups", "text", "created_on")
+        fields = ("id", "urns", "contacts", "groups", "text", "status", "created_on")
 
 
 class BroadcastWriteSerializer(WriteSerializer):
@@ -448,7 +454,7 @@ class ContactWriteSerializer(WriteSerializer):
     language = serializers.CharField(required=False, min_length=3, max_length=3, allow_null=True)
     urns = fields.URNListField(required=False)
     groups = fields.ContactGroupField(many=True, required=False, allow_dynamic=False)
-    fields = fields.LimitedDictField(required=False)
+    fields = fields.LimitedDictField(required=False, child=serializers.CharField(allow_blank=True, allow_null=True))
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -465,7 +471,7 @@ class ContactWriteSerializer(WriteSerializer):
 
         for field_key, field_val in value.items():
             if field_key not in valid_keys:
-                raise serializers.ValidationError("Invalid contact field key: %s" % field_key)
+                raise serializers.ValidationError(f"Invalid contact field key: {field_key}")
 
         return value
 
@@ -715,12 +721,7 @@ class ContactBulkActionSerializer(WriteSerializer):
 
 
 class FlowReadSerializer(ReadSerializer):
-    FLOW_TYPES = {
-        Flow.TYPE_MESSAGE: "message",
-        Flow.TYPE_VOICE: "voice",
-        Flow.TYPE_USSD: "ussd",
-        Flow.TYPE_SURVEY: "survey",
-    }
+    FLOW_TYPES = {Flow.TYPE_MESSAGE: "message", Flow.TYPE_VOICE: "voice", Flow.TYPE_SURVEY: "survey"}
 
     type = serializers.SerializerMethodField()
     archived = serializers.ReadOnlyField(source="is_archived")

@@ -29,7 +29,9 @@ class IndexView(SmartTemplateView):
         context["thanks"] = "thanks" in self.request.GET
         context["errors"] = "errors" in self.request.GET
         if context["errors"]:
-            context["error_msg"] = parse_qs(context["url_params"][1:])["errors"][0]
+            errors = parse_qs(context["url_params"][1:]).get("errors")
+            if isinstance(errors, list) and len(errors) > 0:
+                context["error_msg"] = errors[0]
 
         return context
 
@@ -144,7 +146,8 @@ class GenerateCoupon(View):
 class OrderStatus(View):
     def post(self, request, *args, **kwargs):
         if request.method == "POST":
-            text = request.POST.get("text", "")
+            request_body = json.loads(request.body)
+            text = request_body.get("input", dict()).get("text", "")
         else:
             text = request.GET.get("text", "")
 

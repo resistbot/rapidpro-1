@@ -1,4 +1,5 @@
 import gc
+import logging
 import os
 import time
 from datetime import datetime, timedelta
@@ -18,6 +19,8 @@ from .email import send_template_email
 from .models import TembaModel
 from .text import clean_string
 
+logger = logging.getLogger(__name__)
+
 
 class BaseExportAssetStore(BaseAssetStore):
     def is_asset_ready(self, asset):
@@ -32,7 +35,7 @@ class BaseExportTask(TembaModel):
     analytics_key = None
     asset_type = None
 
-    MAX_EXCEL_ROWS = 1048576
+    MAX_EXCEL_ROWS = 1_048_576
     MAX_EXCEL_COLS = 16384
 
     WIDTH_SMALL = 15
@@ -49,6 +52,9 @@ class BaseExportTask(TembaModel):
         (STATUS_COMPLETE, _("Complete")),
         (STATUS_FAILED, _("Failed")),
     )
+
+    # log progress after this number of exported objects have been exported
+    LOG_PROGRESS_PER_ROWS = 10000
 
     org = models.ForeignKey(
         "orgs.Org", on_delete=models.PROTECT, related_name="%(class)ss", help_text=_("The organization of the user.")
@@ -90,9 +96,7 @@ class BaseExportTask(TembaModel):
                 os.unlink(temp_file.name)
 
         except Exception as e:
-            import traceback
-
-            traceback.print_exc()
+            logger.error(f"Unable to perform export: {str(e)}", exc_info=True)
             self.update_status(self.STATUS_FAILED)
             print(f"Failed to complete {self.analytics_key} with ID {self.id}")
 

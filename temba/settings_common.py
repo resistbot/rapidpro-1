@@ -1,4 +1,3 @@
-
 import os
 import socket
 import sys
@@ -47,19 +46,21 @@ FLOW_FROM_EMAIL = "no-reply@temba.io"
 # HTTP Headers using for outgoing requests to other services
 OUTGOING_REQUEST_HEADERS = {"User-agent": "RapidPro"}
 
-# where recordings and exports are stored
+STORAGE_URL = None  # may be local /media or AWS S3
+STORAGE_ROOT_DIR = "test_orgs" if TESTING else "orgs"
+
+# -----------------------------------------------------------------------------------
+# AWS S3 storage used in production
+# -----------------------------------------------------------------------------------
+AWS_ACCESS_KEY_ID = "aws_access_key_id"
+AWS_SECRET_ACCESS_KEY = "aws_secret_access_key"
+AWS_DEFAULT_ACL = "private"
+
 AWS_STORAGE_BUCKET_NAME = "dl-temba-io"
 AWS_BUCKET_DOMAIN = AWS_STORAGE_BUCKET_NAME + ".s3.amazonaws.com"
-STORAGE_ROOT_DIR = "test_orgs" if TESTING else "orgs"
 
 # bucket where archives files are stored
 ARCHIVE_BUCKET = "dl-temba-archives"
-
-# keys to access s3
-AWS_ACCESS_KEY_ID = "aws_access_key_id"
-AWS_SECRET_ACCESS_KEY = "aws_secret_access_key"
-
-AWS_DEFAULT_ACL = "private"
 
 # -----------------------------------------------------------------------------------
 # On Unix systems, a value of None will cause Django to use the same
@@ -183,7 +184,6 @@ MIDDLEWARE = (
     "temba.middleware.ConsentMiddleware",
     "temba.middleware.BrandingMiddleware",
     "temba.middleware.OrgTimezoneMiddleware",
-    "temba.middleware.FlowSimulationMiddleware",
     "temba.middleware.ActivateLanguageMiddleware",
     "temba.middleware.OrgHeaderMiddleware",
 )
@@ -243,7 +243,6 @@ INSTALLED_APPS = (
     "temba.utils",
     "temba.campaigns",
     "temba.ivr",
-    "temba.ussd",
     "temba.locations",
     "temba.values",
     "temba.airtime",
@@ -289,7 +288,7 @@ BRANDING = {
         "splash": "brands/rapidpro/splash.jpg",
         "logo": "brands/rapidpro/logo.png",
         "allow_signups": True,
-        "flow_types": ["M", "V", "S", "U"],  # see Flow.TYPE_MESSAGE, Flow.TYPE_VOICE, Flow.TYPE_SURVEY, Flow.TYPE_USSD
+        "flow_types": ["M", "V", "S"],  # see Flow.TYPE_MESSAGE, Flow.TYPE_VOICE, Flow.TYPE_SURVEY
         "tiers": dict(import_flows=0, multi_user=0, multi_org=0),
         "bundles": [],
         "welcome_packs": [dict(size=5000, name="Demo Account"), dict(size=100000, name="UNICEF Account")],
@@ -316,7 +315,7 @@ PERMISSIONS = {
     "api.resthook": ("api", "list"),
     "api.webhookevent": ("api",),
     "api.resthooksubscriber": ("api",),
-    "campaigns.campaign": ("api", "archived"),
+    "campaigns.campaign": ("api", "archived", "archive", "activate"),
     "campaigns.campaignevent": ("api",),
     "contacts.contact": (
         "api",
@@ -393,7 +392,7 @@ PERMISSIONS = {
         "search_nexmo",
         "search_numbers",
     ),
-    "channels.channellog": ("session",),
+    "channels.channellog": ("connection",),
     "channels.channelevent": ("api", "calls"),
     "flows.flowstart": ("api",),
     "flows.flow": (
@@ -453,7 +452,6 @@ PERMISSIONS = {
         "referral",
         "register",
         "schedule",
-        "ussd",
     ),
 }
 
@@ -466,6 +464,7 @@ GROUP_PERMISSIONS = {
     "Dashboard": ("orgs.org_dashboard",),
     "Surveyors": (
         "contacts.contact_api",
+        "contacts.contactgroup_api",
         "contacts.contactfield_api",
         "flows.flow_api",
         "locations.adminboundary_api",
@@ -506,8 +505,8 @@ GROUP_PERMISSIONS = {
         "api.resthook_list",
         "api.resthooksubscriber_api",
         "api.webhookevent_api",
-        "api.webhookevent_list",
-        "api.webhookevent_read",
+        "api.webhookresult_list",
+        "api.webhookresult_read",
         "archives.archive.*",
         "campaigns.campaign.*",
         "campaigns.campaignevent.*",
@@ -534,7 +533,6 @@ GROUP_PERMISSIONS = {
         "contacts.contactgroup.*",
         "csv_imports.importtask.*",
         "ivr.ivrcall.*",
-        "ussd.ussdsession.*",
         "locations.adminboundary_alias",
         "locations.adminboundary_api",
         "locations.adminboundary_boundaries",
@@ -589,7 +587,7 @@ GROUP_PERMISSIONS = {
         "channels.channelevent.*",
         "channels.channellog_list",
         "channels.channellog_read",
-        "channels.channellog_session",
+        "channels.channellog_connection",
         "flows.flow.*",
         "flows.flowstart_api",
         "flows.flowlabel.*",
@@ -653,7 +651,6 @@ GROUP_PERMISSIONS = {
         "contacts.contactgroup.*",
         "csv_imports.importtask.*",
         "ivr.ivrcall.*",
-        "ussd.ussdsession.*",
         "locations.adminboundary_alias",
         "locations.adminboundary_api",
         "locations.adminboundary_boundaries",
@@ -812,12 +809,7 @@ DATABASES = {"default": _default_database_config, "direct": _direct_database_con
 if TESTING:
     DATABASES["default"] = _direct_database_config
 
-# -----------------------------------------------------------------------------------
-# Debug Toolbar
-# -----------------------------------------------------------------------------------
 INTERNAL_IPS = iptools.IpRangeList("127.0.0.1", "192.168.0.10", "192.168.0.0/24", "0.0.0.0")  # network block
-
-DEBUG_TOOLBAR_CONFIG = {"INTERCEPT_REDIRECTS": False}  # disable redirect traps
 
 # -----------------------------------------------------------------------------------
 # Crontab Settings ..
@@ -825,6 +817,7 @@ DEBUG_TOOLBAR_CONFIG = {"INTERCEPT_REDIRECTS": False}  # disable redirect traps
 CELERYBEAT_SCHEDULE = {
     "retry-webhook-events": {"task": "retry_events_task", "schedule": timedelta(seconds=300)},
     "check-channels": {"task": "check_channels_task", "schedule": timedelta(seconds=300)},
+    "sync-old-seen-channels": {"task": "sync_old_seen_channels_task", "schedule": timedelta(seconds=600)},
     "schedules": {"task": "check_schedule_task", "schedule": timedelta(seconds=60)},
     "campaigns": {"task": "check_campaigns_task", "schedule": timedelta(seconds=60)},
     "check-flows": {"task": "check_flows_task", "schedule": timedelta(seconds=60)},
@@ -905,7 +898,7 @@ REST_FRAMEWORK = {
         "temba.api.support.APITokenAuthentication",
         "temba.api.support.APIBasicAuthentication",
     ),
-    "DEFAULT_THROTTLE_CLASSES": ("temba.api.support.OrgRateThrottle",),
+    "DEFAULT_THROTTLE_CLASSES": ("temba.api.support.OrgUserRateThrottle",),
     "DEFAULT_THROTTLE_RATES": {
         "v2": "2500/hour",
         "v2.contacts": "2500/hour",
@@ -996,6 +989,7 @@ CHANNEL_TYPES = [
     "temba.channels.types.nexmo.NexmoType",
     "temba.channels.types.africastalking.AfricasTalkingType",
     "temba.channels.types.blackmyna.BlackmynaType",
+    "temba.channels.types.bongolive.BongoLiveType",
     "temba.channels.types.burstsms.BurstSMSType",
     "temba.channels.types.chikka.ChikkaType",
     "temba.channels.types.clickatell.ClickatellType",
@@ -1011,7 +1005,6 @@ CHANNEL_TYPES = [
     "temba.channels.types.jasmin.JasminType",
     "temba.channels.types.jiochat.JioChatType",
     "temba.channels.types.junebug.JunebugType",
-    "temba.channels.types.junebug_ussd.JunebugUSSDType",
     "temba.channels.types.kannel.KannelType",
     "temba.channels.types.line.LineType",
     "temba.channels.types.m3tech.M3TechType",
@@ -1020,6 +1013,7 @@ CHANNEL_TYPES = [
     "temba.channels.types.mblox.MbloxType",
     "temba.channels.types.messangi.MessangiType",
     "temba.channels.types.novo.NovoType",
+    "temba.channels.types.playmobile.PlayMobileType",
     "temba.channels.types.plivo.PlivoType",
     "temba.channels.types.redrabbit.RedRabbitType",
     "temba.channels.types.shaqodoon.ShaqodoonType",
@@ -1031,6 +1025,7 @@ CHANNEL_TYPES = [
     "temba.channels.types.twitter_activity.TwitterActivityType",
     "temba.channels.types.verboice.VerboiceType",
     "temba.channels.types.viber_public.ViberPublicType",
+    "temba.channels.types.wavy.WavyType",
     "temba.channels.types.wechat.WeChatType",
     "temba.channels.types.yo.YoType",
     "temba.channels.types.zenvia.ZenviaType",
@@ -1093,26 +1088,10 @@ EVENT_FIRE_TRIM_DAYS = 90
 FLOW_SESSION_TRIM_DAYS = 7
 
 # -----------------------------------------------------------------------------------
-# Flowserver - disabled by default. GoFlow defaults to http://localhost:8800
-# -----------------------------------------------------------------------------------
-FLOW_SERVER_URL = None
-FLOW_SERVER_AUTH_TOKEN = None
-FLOW_SERVER_DEBUG = False
-FLOW_SERVER_FORCE = False
-FLOW_SERVER_TRIAL = "off"  # 'on', 'off', or 'always'
-
-# -----------------------------------------------------------------------------------
 # Mailroom - disabled by default, but is where simulation happens
 # -----------------------------------------------------------------------------------
 MAILROOM_URL = None
 MAILROOM_AUTH_TOKEN = None
-
-# -----------------------------------------------------------------------------------
-# These legacy channels still send on RapidPro:
-#   * TT is our old Twitter integration, will be removed ~June 2018
-#   * JNU is junebug USSD, which may be removed depending on future of USSD
-# -----------------------------------------------------------------------------------
-LEGACY_CHANNELS = set(["TT", "JNU"])
 
 # -----------------------------------------------------------------------------------
 # Chatbase integration

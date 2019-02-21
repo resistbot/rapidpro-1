@@ -1,4 +1,3 @@
-
 import logging
 import time
 from datetime import timedelta
@@ -177,13 +176,12 @@ def send_to_flow_node(org_id, user_id, text, **kwargs):
 
     org = Org.objects.get(pk=org_id)
     user = User.objects.get(pk=user_id)
-    simulation = kwargs.get("simulation", "false") == "true"
     node_uuid = kwargs.get("s", None)
 
     runs = FlowRun.objects.filter(org=org, current_node_uuid=node_uuid, is_active=True)
 
     contact_ids = (
-        Contact.objects.filter(org=org, is_blocked=False, is_stopped=False, is_active=True, is_test=simulation)
+        Contact.objects.filter(org=org, is_blocked=False, is_stopped=False, is_active=True)
         .filter(id__in=runs.values_list("contact", flat=True))
         .values_list("id", flat=True)
     )
@@ -203,7 +201,7 @@ def send_spam(user_id, contact_id):  # pragma: no cover
     from temba.contacts.models import Contact, TEL_SCHEME
     from temba.msgs.models import Broadcast
 
-    contact = Contact.all().get(pk=contact_id)
+    contact = Contact.objects.get(pk=contact_id)
     user = User.objects.get(pk=user_id)
     channel = contact.org.get_send_channel(TEL_SCHEME)
 
@@ -211,7 +209,10 @@ def send_spam(user_id, contact_id):  # pragma: no cover
         print("Sorry, no channel to be all spammy with")
         return
 
-    long_text = "Test Message #%d. The path of the righteous man is beset on all sides by the iniquities of the " "selfish and the tyranny of evil men. Blessed is your face."
+    long_text = (
+        "Test Message #%d. The path of the righteous man is beset on all sides by the iniquities of the "
+        "selfish and the tyranny of evil men. Blessed is your face."
+    )
 
     # only trigger sync on the last one
     for idx in range(10):
@@ -298,7 +299,6 @@ def check_messages_task():  # pragma: needs cover
     """
     from .models import INCOMING, PENDING
     from temba.orgs.models import Org
-    from temba.channels.tasks import send_msg_task
     from temba.flows.tasks import start_msg_flow_batch_task
 
     now = timezone.now()
@@ -312,16 +312,15 @@ def check_messages_task():  # pragma: needs cover
         if queued < 1000:
             org.trigger_send()
 
-    # fire a few send msg tasks in case we dropped one somewhere during a restart
+    # fire a few tasks in case we dropped one somewhere during a restart
     # (these will be no-ops if there is nothing to do)
     for i in range(100):
-        send_msg_task.apply_async(queue=Queue.MSGS)
         handle_event_task.apply_async(queue=Queue.HANDLER)
         start_msg_flow_batch_task.apply_async(queue=Queue.FLOWS)
 
     # also check any incoming messages that are still pending somehow, reschedule them to be handled
     unhandled_messages = Msg.objects.filter(direction=INCOMING, status=PENDING, created_on__lte=five_minutes_ago)
-    unhandled_messages = unhandled_messages.exclude(channel__is_active=False).exclude(contact__is_test=True)
+    unhandled_messages = unhandled_messages.exclude(channel__is_active=False)
     unhandled_count = unhandled_messages.count()
 
     if unhandled_count:

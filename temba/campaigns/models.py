@@ -99,13 +99,15 @@ class Campaign(TembaModel):
 
                 # fill our campaign with events
                 for event_spec in campaign_spec["events"]:
-                    relative_to = ContactField.get_or_create(
-                        org,
-                        user,
-                        key=event_spec["relative_to"]["key"],
-                        label=event_spec["relative_to"]["label"],
-                        value_type="D",
-                    )
+                    field_key = event_spec["relative_to"]["key"]
+
+                    if field_key == "created_on":
+                        relative_to = ContactField.system_fields.filter(org=org, key=field_key).first()
+                    else:
+                        relative_to = ContactField.get_or_create(
+                            org, user, key=field_key, label=event_spec["relative_to"]["label"], value_type="D"
+                        )
+
                     start_mode = event_spec.get("start_mode", CampaignEvent.MODE_INTERRUPT)
 
                     # create our message flow for message events
@@ -232,7 +234,7 @@ class Campaign(TembaModel):
             if evt.flow.is_system:
                 evt.flow.ensure_current_version()
 
-        return sorted(events, key=lambda e: e.relative_to.pk * 100000 + e.minute_offset())
+        return sorted(events, key=lambda e: e.relative_to.pk * 100_000 + e.minute_offset())
 
     def __str__(self):
         return self.name
@@ -586,9 +588,7 @@ class EventFire(Model):
         contacts = [f.contact for f in fires]
         event = fires[0].event
 
-        include_active = not (
-            event.event_type == CampaignEvent.TYPE_MESSAGE and event.start_mode == CampaignEvent.MODE_SKIP
-        )
+        include_active = event.start_mode != CampaignEvent.MODE_SKIP
         if event.is_active and not event.campaign.is_archived:
             if len(contacts) == 1:
                 flow.start(
@@ -633,16 +633,11 @@ class EventFire(Model):
             if field.field_type == ContactField.FIELD_TYPE_USER:
                 field_uuid = str(field.uuid)
 
-                contacts = (
-                    event.campaign.group.contacts.filter(is_active=True, is_blocked=False)
-                    .exclude(is_test=True)
-                    .extra(
-                        where=['%s::text[] <@ (extract_jsonb_keys("contacts_contact"."fields"))'],
-                        params=[[field_uuid]],
-                    )
+                contacts = event.campaign.group.contacts.filter(is_active=True, is_blocked=False).extra(
+                    where=['%s::text[] <@ (extract_jsonb_keys("contacts_contact"."fields"))'], params=[[field_uuid]]
                 )
             elif field.field_type == ContactField.FIELD_TYPE_SYSTEM:
-                contacts = event.campaign.group.contacts.filter(is_active=True, is_blocked=False).exclude(is_test=True)
+                contacts = event.campaign.group.contacts.filter(is_active=True, is_blocked=False)
             else:  # pragma: no cover
                 raise ValueError(f"Unhandled ContactField type {field.field_type}.")
 
@@ -683,13 +678,8 @@ class EventFire(Model):
                 field = event.relative_to
                 field_uuid = str(field.uuid)
 
-                contacts = (
-                    event.campaign.group.contacts.filter(is_active=True, is_blocked=False)
-                    .exclude(is_test=True)
-                    .extra(
-                        where=['%s::text[] <@ (extract_jsonb_keys("contacts_contact"."fields"))'],
-                        params=[[field_uuid]],
-                    )
+                contacts = event.campaign.group.contacts.filter(is_active=True, is_blocked=False).extra(
+                    where=['%s::text[] <@ (extract_jsonb_keys("contacts_contact"."fields"))'], params=[[field_uuid]]
                 )
 
                 events = []
@@ -719,22 +709,22 @@ class EventFire(Model):
             EventFire.update_campaign_events_for_contact(campaign, contact)
 
     @classmethod
-    def update_events_for_contact_fields(cls, contact, keys, is_new=False):
+    def update_events_for_contact_fields(cls, contact, keys):
         """
         Updates all the events for a contact, across all campaigns.
         Should be called anytime a contact field or contact group membership changes.
         """
-        # get all events which are in one of these groups and on this field
+        # make sure we consider immutable fields(created_on)
+        keys = list(keys)
+        keys.extend(list(ContactField.IMMUTABLE_FIELDS))
+
         events = CampaignEvent.objects.filter(
             campaign__group__in=contact.user_groups,
+            campaign__org=contact.org,
             relative_to__key__in=keys,
             campaign__is_archived=False,
             is_active=True,
         ).prefetch_related("relative_to")
-
-        if is_new is False:
-            # only new contacts can trigger campaign event reevaluation that are relative to immutable fields
-            events.exclude(relative_to__key__in=ContactField.IMMUTABLE_FIELDS)
 
         for event in events:
             # remove any unfired events, they will get recreated below
@@ -744,7 +734,7 @@ class EventFire(Model):
             scheduled = event.calculate_scheduled_fire(contact)
 
             # and if we have a date, then schedule it
-            if scheduled and not contact.is_test:
+            if scheduled:
                 EventFire.objects.create(event=event, contact=contact, scheduled=scheduled)
 
     @classmethod
@@ -764,7 +754,7 @@ class EventFire(Model):
                 scheduled = event.calculate_scheduled_fire(contact)
 
                 # and if we have a date, then schedule it
-                if scheduled and not contact.is_test:
+                if scheduled:
                     EventFire.objects.create(event=event, contact=contact, scheduled=scheduled)
 
     def __str__(self):

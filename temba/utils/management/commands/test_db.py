@@ -102,7 +102,7 @@ LABELS = ("Reporting", "Testing", "Youth", "Farming", "Health", "Education", "Tr
 FLOWS = (
     {
         "name": "Favorites",
-        "file": "favorites.json",
+        "file": "favorites_timeout.json",
         "templates": (
             ["blue", "mutzig", "bob"],
             ["orange", "green", "primus", "jeb"],
@@ -160,9 +160,8 @@ class Command(BaseCommand):
     stealth_options = ("num_orgs", "num_contacts", "seed", "org_id", "num_runs", "flow_name", "seed")
 
     def add_arguments(self, parser):
-        cmd = self
         subparsers = parser.add_subparsers(
-            dest="command", help="Command to perform", parser_class=lambda **kw: CommandParser(cmd, **kw)
+            dest="command", help="Command to perform", parser_class=lambda **kw: CommandParser(**kw)
         )
 
         gen_parser = subparsers.add_parser("generate", help="Generates a clean testing database")
@@ -223,10 +222,10 @@ class Command(BaseCommand):
         self.create_channels(orgs)
         self.create_fields(orgs)
         self.create_groups(orgs)
+        self.create_contacts(orgs, locations, num_contacts)
         self.create_labels(orgs)
         self.create_flows(orgs)
         self.create_archives(orgs)
-        self.create_contacts(orgs, locations, num_contacts)
         self.create_campaigns(orgs)
 
     def handle_simulate(self, num_runs, org_id, flow_name, seed):
@@ -349,7 +348,7 @@ class Command(BaseCommand):
         self._log(self.style.SUCCESS("OK") + "\nInitializing orgs... ")
 
         for o, org in enumerate(orgs):
-            org.initialize(topup_size=max((1000 - o), 1) * 1000)
+            org.initialize(topup_size=max((1000 - o), 1) * 1000, flow_server_enabled=False)
 
             # we'll cache some metadata on each org as it's created to save re-fetching things
             org.cache = {
@@ -405,7 +404,7 @@ class Command(BaseCommand):
         """
         self._log("Creating %d archives... " % (len(orgs) * ARCHIVES * 3))
 
-        MAX_RECORDS_PER_DAY = 3000000
+        MAX_RECORDS_PER_DAY = 3_000_000
 
         def create_archive(max_records, start, period):
             record_count = random.randint(0, max_records)
@@ -413,10 +412,16 @@ class Command(BaseCommand):
             archive_hash = uuid.uuid4().hex
 
             if period == Archive.PERIOD_DAILY:
-                archive_url = f"https://dl-rapidpro-archives.s3.amazonaws.com/{org.id}/" f"{type[0]}_{period}_{start.year}_{start.month}_{start.day}_{archive_hash}.jsonl.gz"
+                archive_url = (
+                    f"https://dl-rapidpro-archives.s3.amazonaws.com/{org.id}/"
+                    f"{type[0]}_{period}_{start.year}_{start.month}_{start.day}_{archive_hash}.jsonl.gz"
+                )
             else:
 
-                archive_url = f"https://dl-rapidpro-archives.s3.amazonaws.com/{org.id}/" f"{type[0]}_{period}_{start.year}_{start.month}_{archive_hash}.jsonl.gz"
+                archive_url = (
+                    f"https://dl-rapidpro-archives.s3.amazonaws.com/{org.id}/"
+                    f"{type[0]}_{period}_{start.year}_{start.month}_{archive_hash}.jsonl.gz"
+                )
 
             Archive.objects.create(
                 org=org,
@@ -569,14 +574,6 @@ class Command(BaseCommand):
         """
         group_counts = defaultdict(int)
 
-        self._log("Creating %d test contacts..." % (len(orgs) * len(USERS)))
-
-        for org in orgs:
-            test_contacts = []
-            for user in org.cache["users"]:
-                test_contacts.append(Contact.get_test_contact(user))
-            org.cache["test_contacts"] = test_contacts
-
         self._log(self.style.SUCCESS("OK") + "\n")
         self._log("Creating %d regular contacts...\n" % num_contacts)
 
@@ -618,9 +615,8 @@ class Command(BaseCommand):
                         "is_active": self.probability(1 - CONTACT_IS_DELETED_PROB),
                         "created_on": created_on,
                         "modified_on": self.random_date(created_on, self.db_ends_on),
+                        "fields_as_json": {},
                     }
-
-                    c["fields_as_json"] = {}
 
                     if c["gender"] is not None:
                         c["fields_as_json"][str(org.cache["fields"]["gender"].uuid)] = {"text": str(c["gender"])}

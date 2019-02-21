@@ -35,7 +35,7 @@ def deliver_event_task(event_id):  # pragma: no cover
 
 
 @task(track_started=True, name="retry_events_task")
-def retry_events_task():  # pragma: no cover
+def retry_events_task():
     print("** retrying errored webhook events")
 
     # get all events that have an error and need to be retried
@@ -53,10 +53,10 @@ def retry_events_task():  # pragma: no cover
         deliver_event_task.delay(event.pk)
 
     # and any that were errored and haven't been retried for some reason
-    fifteen_minutes_ago = now - timedelta(minutes=15)
-    for event in WebHookEvent.objects.filter(
-        status=WebHookEvent.STATUS_ERRORED, modified_on__lte=fifteen_minutes_ago
-    ).exclude(event=WebHookEvent.TYPE_FLOW):
+    hour_ago = now - timedelta(minutes=60)
+    for event in WebHookEvent.objects.filter(status=WebHookEvent.STATUS_ERRORED, created_on__lte=hour_ago).exclude(
+        event=WebHookEvent.TYPE_FLOW
+    ):
         deliver_event_task.delay(event.pk)
 
 
@@ -80,6 +80,13 @@ def trim_webhook_event_task():
             for event in WebHookEvent.objects.filter(id__in=batch):
                 event.release()
 
+        result_ids = WebHookResult.objects.filter(created_on__lte=success_log_later, status_code__lt=400).values_list(
+            "id", flat=True
+        )
+        for batch in chunk_list(result_ids, 1000):
+            for result in WebHookResult.objects.filter(id__in=batch):
+                result.release()
+
     if all_logs_trim_time:
         all_log_later = timezone.now() - timedelta(hours=all_logs_trim_time)
         event_ids = WebHookEvent.objects.filter(created_on__lte=all_log_later)
@@ -87,3 +94,8 @@ def trim_webhook_event_task():
         for batch in chunk_list(event_ids, 1000):
             for event in WebHookEvent.objects.filter(id__in=batch):
                 event.release()
+
+        result_ids = WebHookResult.objects.filter(created_on__lte=all_log_later).values_list("id", flat=True)
+        for batch in chunk_list(result_ids, 1000):
+            for result in WebHookResult.objects.filter(id__in=batch):
+                result.release()
