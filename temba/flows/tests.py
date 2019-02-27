@@ -55,6 +55,7 @@ from .flow_migrations import (
     migrate_to_version_11_8,
     migrate_to_version_11_9,
     migrate_to_version_11_11,
+    migrate_to_version_11_12,
 )
 from .models import (
     Action,
@@ -6782,11 +6783,21 @@ class FlowsTest(FlowFileTest):
         self.assertEqual(6, FlowRun.objects.filter(is_active=True).count())
         self.assertEqual(FlowRunCount.get_totals(flow), {"A": 6, "C": 0, "E": 6, "I": 0})
 
+        # create a flow session for our first one
+        first = FlowRun.objects.filter(is_active=True).first()
+        session = FlowSession.objects.create(org=self.org, contact=first.contact, status=FlowSession.STATUS_WAITING)
+        first.session = session
+        first.save(update_fields=["session"])
+
         # stop them all
         FlowRun.bulk_exit(FlowRun.objects.filter(is_active=True), FlowRun.EXIT_TYPE_INTERRUPTED)
 
         self.assertEqual(FlowRun.objects.filter(is_active=False, exit_type="I").exclude(exited_on=None).count(), 6)
         self.assertEqual(FlowRunCount.get_totals(flow), {"A": 0, "C": 0, "E": 6, "I": 6})
+
+        session.refresh_from_db()
+        self.assertEqual(FlowSession.STATUS_INTERRUPTED, session.status)
+        self.assertIsNotNone(session.ended_on)
 
         # squash our counts
         squash_flowruncounts()
@@ -9076,6 +9087,122 @@ class FlowMigrationTest(FlowFileTest):
         self.assertEqual(flow_json["base_language"], "base")
         self.assertEqual(5, len(flow_json["action_sets"]))
         self.assertEqual(1, len(flow_json["rule_sets"]))
+
+    def test_migrate_to_11_12(self):
+        flow = self.get_flow("favorites")
+        definition = {
+            "entry": "79b4776b-a995-475d-ae06-1cab9af8a28e",
+            "rule_sets": [],
+            "action_sets": [
+                {
+                    "uuid": "d1244cfb-dc48-4dd5-ac45-7da49fdf46fb",
+                    "x": 459,
+                    "y": 150,
+                    "destination": "ef4865e9-1d34-4876-a0ff-fa3fe5025b3e",
+                    "actions": [
+                        {
+                            "type": "reply",
+                            "uuid": "3db54617-cce1-455b-a787-12df13df87bd",
+                            "msg": {"base": "Hi there"},
+                            "media": {},
+                            "quick_replies": [],
+                            "send_all": False,
+                        }
+                    ],
+                    "exit_uuid": "959fbe68-ba5a-4c78-b8d1-861e64d1e1e3",
+                },
+                {
+                    "uuid": "79b4776b-a995-475d-ae06-1cab9af8a28e",
+                    "x": 476,
+                    "y": 0,
+                    "destination": "d1244cfb-dc48-4dd5-ac45-7da49fdf46fb",
+                    "actions": [
+                        {
+                            "type": "channel",
+                            "uuid": "f133934a-9772-419f-ad52-00fe934dab19",
+                            "channel": None,
+                            "name": None,
+                        }
+                    ],
+                    "exit_uuid": "aec0318d-45c2-4c39-92fc-81d3d21178f6",
+                },
+            ],
+        }
+
+        migrated = migrate_to_version_11_12(definition, flow)
+
+        # removed the invalid reference
+        self.assertEqual(len(migrated["action_sets"]), 1)
+
+        # reconnected the nodes to new destinations and adjust entry
+        self.assertEqual(migrated["entry"], migrated["action_sets"][0]["uuid"])
+        self.assertEqual(migrated["action_sets"][0]["y"], 0)
+
+        definition = {
+            "entry": "79b4776b-a995-475d-ae06-1cab9af8a28e",
+            "rule_sets": [],
+            "action_sets": [
+                {
+                    "uuid": "d1244cfb-dc48-4dd5-ac45-7da49fdf46fb",
+                    "x": 459,
+                    "y": 150,
+                    "destination": "ef4865e9-1d34-4876-a0ff-fa3fe5025b3e",
+                    "actions": [
+                        {
+                            "type": "reply",
+                            "uuid": "3db54617-cce1-455b-a787-12df13df87bd",
+                            "msg": {"base": "Hi there"},
+                            "media": {},
+                            "quick_replies": [],
+                            "send_all": False,
+                        }
+                    ],
+                    "exit_uuid": "959fbe68-ba5a-4c78-b8d1-861e64d1e1e3",
+                },
+                {
+                    "uuid": "79b4776b-a995-475d-ae06-1cab9af8a28e",
+                    "x": 476,
+                    "y": 0,
+                    "destination": "d1244cfb-dc48-4dd5-ac45-7da49fdf46fb",
+                    "actions": [
+                        {
+                            "type": "channel",
+                            "uuid": "f133934a-9772-419f-ad52-00fe934dab19",
+                            "channel": self.channel.uuid,
+                            "name": self.channel.name,
+                        }
+                    ],
+                    "exit_uuid": "aec0318d-45c2-4c39-92fc-81d3d21178f6",
+                },
+            ],
+        }
+
+        migrated = migrate_to_version_11_12(definition, flow)
+
+        # removed the invalid reference
+        self.assertEqual(len(migrated["action_sets"]), 2)
+
+        flow = self.get_flow("migrate_to_11_12")
+        flow_json = self.get_flow_json("migrate_to_11_12")
+        migrate_to_version_11_12(flow_json, flow)
+
+        actionset = flow.action_sets.filter(y=0).first()
+        self.assertEqual(actionset.actions[0]["msg"]["base"], "Hey there, Yes or No?")
+
+        action_sets = flow.action_sets.all()
+        self.assertEqual(len(action_sets), 3)
+
+    def test_migrate_to_11_12_with_valid_channels(self):
+        self.channel.name = "1234"
+        self.channel.save()
+
+        self.org = self.channel.org
+        flow = self.get_flow("migrate_to_11_12")
+        flow_json = self.get_flow_json("migrate_to_11_12")
+        migrate_to_version_11_12(flow_json, flow)
+
+        action_sets = flow.action_sets.all()
+        self.assertEqual(len(action_sets), 7)
 
     def test_migrate_to_11_11(self):
 
