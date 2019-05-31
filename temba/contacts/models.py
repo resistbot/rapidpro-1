@@ -350,14 +350,37 @@ class URN(object):
         return cls.from_parts(WECHAT_SCHEME, path)
 
 
+class UserContactFieldsQuerySet(models.QuerySet):
+    def collect_usage(self):
+        return (
+            self.annotate(
+                flow_count=Count("dependent_flows", distinct=True, filter=Q(dependent_flows__is_active=True))
+            )
+            .annotate(campaign_count=Count("campaigns", distinct=True, filter=Q(campaigns__is_active=True)))
+            .annotate(contactgroup_count=Count("contactgroup", distinct=True, filter=Q(contactgroup__is_active=True)))
+        )
+
+    def active_for_org(self, org):
+        return self.filter(is_active=True, org=org)
+
+
 class UserContactFieldsManager(models.Manager):
     def get_queryset(self):
-        return super().get_queryset().filter(field_type=ContactField.FIELD_TYPE_USER)
+        return UserContactFieldsQuerySet(self.model, using=self._db).filter(field_type=ContactField.FIELD_TYPE_USER)
 
     def create(self, **kwargs):
         kwargs["field_type"] = ContactField.FIELD_TYPE_USER
 
         return super().create(**kwargs)
+
+    def count_active_for_org(self, org):
+        return self.get_queryset().active_for_org(org=org).count()
+
+    def collect_usage(self):
+        return self.get_queryset().collect_usage()
+
+    def active_for_org(self, org):
+        return self.get_queryset().active_for_org(org=org)
 
 
 class SystemContactFieldsManager(models.Manager):
@@ -406,7 +429,9 @@ class ContactField(SmartModel):
     value_type = models.CharField(
         choices=Value.TYPE_CHOICES, max_length=1, default=Value.TYPE_TEXT, verbose_name="Field Type"
     )
-    show_in_table = models.BooleanField(verbose_name=_("Shown in Tables"), default=False)
+    show_in_table = models.BooleanField(
+        verbose_name=_("Shown in Tables"), default=False, help_text=_("Featured field")
+    )
 
     priority = models.PositiveIntegerField(default=0)
 
@@ -440,22 +465,20 @@ class ContactField(SmartModel):
 
     @classmethod
     def hide_field(cls, org, user, key):
-        existing = ContactField.user_fields.filter(org=org, key=key).first()
-        if existing:
-            from temba.flows.models import Flow
+        existing = ContactField.user_fields.collect_usage().active_for_org(org=org).filter(key=key).first()
 
-            if Flow.objects.filter(field_dependencies__in=[existing]).exists():
-                raise ValueError("Cannot delete field '%s' while used in flows." % key)
+        if existing:
+
+            if any([existing.flow_count, existing.campaign_count, existing.contactgroup_count]):
+                formatted_field_use = (
+                    f"F: {existing.flow_count} C: {existing.campaign_count} G: {existing.contactgroup_count}"
+                )
+                raise ValueError(f"Cannot delete field '{key}', it's used by: {formatted_field_use}")
 
             existing.is_active = False
             existing.show_in_table = False
             existing.modified_by = user
             existing.save(update_fields=("is_active", "show_in_table", "modified_by", "modified_on"))
-
-            # cancel any events on this
-            from temba.campaigns.models import EventFire
-
-            EventFire.update_field_events(existing)
 
     @classmethod
     def get_or_create(cls, org, user, key, label=None, show_in_table=None, value_type=None, priority=None):
@@ -468,7 +491,7 @@ class ContactField(SmartModel):
             label = label.strip()
 
         with org.lock_on(OrgLock.field, key):
-            field = ContactField.user_fields.filter(org=org, key__iexact=key).first()
+            field = ContactField.user_fields.active_for_org(org=org).filter(key__iexact=key).first()
 
             if not field:
                 # try to lookup the existing field by label
@@ -479,14 +502,7 @@ class ContactField(SmartModel):
                 field = None
 
             if field:
-                update_events = False
                 changed = False
-
-                # make this as active
-                if not field.is_active:
-                    field.is_active = True
-                    update_events = True
-                    changed = True
 
                 # update whether we show in tables if passed in
                 if show_in_table is not None and show_in_table != field.show_in_table:
@@ -514,11 +530,6 @@ class ContactField(SmartModel):
                 if changed:
                     field.modified_by = user
                     field.save()
-
-                    if update_events:
-                        from temba.campaigns.models import EventFire
-
-                        EventFire.update_field_events(field)
 
             else:
                 # we need to create a new contact field, use our key with invalid chars removed
@@ -552,13 +563,13 @@ class ContactField(SmartModel):
 
     @classmethod
     def get_by_label(cls, org, label):
-        return cls.user_fields.filter(org=org, is_active=True, label__iexact=label).first()
+        return cls.user_fields.active_for_org(org=org).filter(label__iexact=label).first()
 
     @classmethod
     def get_by_key(cls, org, key):
         field = org.cached_contact_fields.get(key)
         if field is None:
-            field = ContactField.user_fields.filter(org=org, is_active=True, key=key).first()
+            field = ContactField.user_fields.active_for_org(org=org).filter(key=key).first()
             if field:
                 org.cached_contact_fields[key] = field
 
@@ -566,7 +577,7 @@ class ContactField(SmartModel):
 
     @classmethod
     def get_location_field(cls, org, type):
-        return cls.user_fields.filter(is_active=True, org=org, value_type=type).first()
+        return cls.user_fields.active_for_org(org=org).filter(value_type=type).first()
 
     def release(self, user):
         self.is_active = False
@@ -582,30 +593,10 @@ MAX_HISTORY = 50
 
 
 class Contact(RequireUpdateFieldsMixin, TembaModel):
+    org = models.ForeignKey(Org, on_delete=models.PROTECT, related_name="contacts")
+
     name = models.CharField(
         verbose_name=_("Name"), max_length=128, blank=True, null=True, help_text=_("The name of this contact")
-    )
-
-    org = models.ForeignKey(
-        Org,
-        on_delete=models.PROTECT,
-        verbose_name=_("Org"),
-        related_name="org_contacts",
-        help_text=_("The organization that this contact belongs to"),
-    )
-
-    is_blocked = models.BooleanField(
-        verbose_name=_("Is Blocked"), default=False, help_text=_("Whether this contact has been blocked")
-    )
-
-    is_test = models.BooleanField(
-        verbose_name=_("Is Test"), default=False, help_text=_("Whether this contact is for simulation")
-    )
-
-    is_stopped = models.BooleanField(
-        verbose_name=_("Is Stopped"),
-        default=False,
-        help_text=_("Whether this contact has opted out of receiving messages"),
     )
 
     language = models.CharField(
@@ -616,25 +607,30 @@ class Contact(RequireUpdateFieldsMixin, TembaModel):
         help_text=_("The preferred language for this contact"),
     )
 
-    fields = JSONField(
-        verbose_name=_("Fields"), null=True, help_text=_("The fields set for this contact, keyed by UUID")
-    )
+    # whether contact has been blocked by a user
+    is_blocked = models.BooleanField(default=False)
 
+    # whether contact has opted out of receiving messages
+    is_stopped = models.BooleanField(default=False)
+
+    # custom field values for this contact, keyed by field UUID
+    fields = JSONField(null=True)
+
+    # user that last modified this contact
     modified_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True,
         on_delete=models.PROTECT,
         related_name="%(app_label)s_%(class)s_modifications",
-        help_text="The user which last modified this item",
     )
 
+    # user that created this contact
     created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.PROTECT,
-        related_name="%(app_label)s_%(class)s_creations",
-        null=True,
-        help_text=_("The user which created this item"),
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="%(app_label)s_%(class)s_creations", null=True
     )
+
+    # to be dropped once no longer used by other applications (see https://github.com/rapidpro/rapidpro/issues/878)
+    is_test = models.BooleanField(default=False)
 
     NAME = "name"
     FIRST_NAME = "first_name"
@@ -775,7 +771,7 @@ class Contact(RequireUpdateFieldsMixin, TembaModel):
         """
         from temba.api.models import WebHookResult
         from temba.ivr.models import IVRCall
-        from temba.msgs.models import Msg, BroadcastRecipient
+        from temba.msgs.models import Msg
 
         msgs = Msg.objects.filter(contact=self, created_on__gte=after, created_on__lt=before)
         msgs = (
@@ -784,22 +780,6 @@ class Contact(RequireUpdateFieldsMixin, TembaModel):
             .select_related("channel")
             .prefetch_related("channel_logs")[:MAX_HISTORY]
         )
-
-        # we also include in the timeline purged broadcasts with a best guess at the translation used
-        recipients = BroadcastRecipient.objects.filter(contact=self)
-        recipients = recipients.filter(
-            broadcast__purged=True, broadcast__created_on__gte=after, broadcast__created_on__lt=before
-        )
-        recipients = recipients.order_by("-broadcast__created_on").select_related("broadcast")[:MAX_HISTORY]
-        broadcasts = []
-        for recipient in recipients:
-            broadcast = recipient.broadcast
-            media = broadcast.get_translated_media(contact=self, org=self.org) if broadcast.media else None
-
-            broadcast.translated_text = broadcast.get_translated_text(contact=self, org=self.org)
-            broadcast.purged_status = recipient.purged_status
-            broadcast.attachments = [media] if media else []
-            broadcasts.append(broadcast)
 
         # and all of this contact's runs, channel events such as missed calls, scheduled events
         started_runs = self.runs.filter(created_on__gte=after, created_on__lt=before).exclude(flow__is_system=True)
@@ -829,7 +809,6 @@ class Contact(RequireUpdateFieldsMixin, TembaModel):
         # wrap items, chain and sort by time
         activity = chain(
             [{"type": "msg", "time": m.created_on, "obj": m} for m in msgs],
-            [{"type": "broadcast", "time": b.created_on, "obj": b} for b in broadcasts],
             [{"type": "run-start", "time": r.created_on, "obj": r} for r in started_runs],
             [{"type": "run-exit", "time": r.exited_on, "obj": r} for r in exited_runs],
             [{"type": "channel-event", "time": e.created_on, "obj": e} for e in channel_events],
@@ -1152,7 +1131,7 @@ class Contact(RequireUpdateFieldsMixin, TembaModel):
             return None
 
     @classmethod
-    def get_or_create(cls, org, urn, channel=None, name=None, auth=None, user=None):
+    def get_or_create(cls, org, urn, channel=None, name=None, auth=None, user=None, init_new=True):
         """
         Gets or creates a contact with the given URN
         """
@@ -1181,6 +1160,7 @@ class Contact(RequireUpdateFieldsMixin, TembaModel):
         else:
             kwargs = dict(org=org, name=name, created_by=user, is_test=False)
             contact = Contact.objects.create(**kwargs)
+            contact.is_new = True
             updated_attrs = list(kwargs.keys())
 
             if existing_urn:
@@ -1195,7 +1175,9 @@ class Contact(RequireUpdateFieldsMixin, TembaModel):
             analytics.gauge("temba.contact_created")
 
             # handle group and campaign updates
-            contact.handle_update(fields=updated_attrs, urns=updated_urns, is_new=True)
+            if init_new:
+                contact.handle_update(fields=updated_attrs, urns=updated_urns, is_new=True)
+
             return contact, urn_obj
 
     @classmethod
@@ -1504,7 +1486,8 @@ class Contact(RequireUpdateFieldsMixin, TembaModel):
                 field_dict[key] = value
 
                 # create the contact field if it doesn't exist
-                ContactField.get_or_create(field_dict["org"], user, key, label, False, field["type"])
+                ContactField.get_or_create(field_dict["org"], user, key, label, value_type=field["type"])
+
                 extra_fields.append(key)
             else:
                 raise ValueError("Extra field %s is a reserved field name" % key)
@@ -3160,9 +3143,7 @@ class ExportContactsTask(BaseExportTask):
                         fields.append(field_dict)
 
         contact_fields_list = (
-            ContactField.user_fields.filter(org=self.org, is_active=True)
-            .select_related("org")
-            .order_by("-priority", "pk")
+            ContactField.user_fields.active_for_org(org=self.org).select_related("org").order_by("-priority", "pk")
         )
         for contact_field in contact_fields_list:
             fields.append(

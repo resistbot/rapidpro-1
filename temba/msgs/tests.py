@@ -51,7 +51,7 @@ from temba.utils.queues import Queue, push_task
 from temba.values.constants import Value
 
 from .management.commands.msg_console import MessageConsole
-from .tasks import clear_old_msg_external_ids, process_message_task, squash_msgcounts
+from .tasks import process_message_task, squash_msgcounts
 from .templatetags.sms import as_icon
 
 
@@ -147,6 +147,9 @@ class MsgTest(TembaTest):
         msg1 = Msg.create_incoming(self.channel, self.joe.get_urn().urn, "i'm having a problem")
         msg2 = Msg.create_incoming(self.channel, self.frank.get_urn().urn, "ignore joe, he's a liar")
 
+        # create a channel log for msg2
+        ChannelLog.objects.create(channel=self.channel, msg=msg2, is_error=False)
+
         # we've used two credits
         self.assertEqual(2, Msg.objects.all().count())
         self.assertEqual(self.org._calculate_credits_used()[0], 2)
@@ -160,6 +163,9 @@ class MsgTest(TembaTest):
         msg2.release(Msg.DELETE_FOR_USER)
         self.assertEqual(0, Msg.objects.all().count())
         self.assertEqual(self.org._calculate_credits_used()[0], 1)
+
+        # log should be gone
+        self.assertEqual(0, ChannelLog.objects.filter(channel=self.channel).count())
 
     def test_get_sync_commands(self):
         msg1 = Msg.create_outgoing(self.org, self.admin, self.joe, "Hello, we heard from you.")
@@ -1548,11 +1554,18 @@ class MsgTest(TembaTest):
 
         # create a dummy export task so that we won't be able to export
         blocking_export = ExportMessagesTask.create(self.org, self.admin, SystemLabel.TYPE_INBOX)
+
+        old_modified_on = blocking_export.modified_on
+
         response = self.client.post(reverse("msgs.msg_export") + "?l=I", {"export_all": 1}, follow=True)
         self.assertContains(response, "already an export in progress")
 
         # perform the export manually, assert how many queries
         self.assertNumQueries(11, lambda: blocking_export.perform())
+
+        blocking_export.refresh_from_db()
+        # after performing the export `modified_on` should be updated
+        self.assertNotEqual(old_modified_on, blocking_export.modified_on)
 
         def request_export(query, data=None):
             response = self.client.post(reverse("msgs.msg_export") + query, data)
@@ -2716,26 +2729,6 @@ class BroadcastTest(TembaTest):
 
         self.assertEqual(self.joe.msgs.get(broadcast=broadcast2).text, "Hi @contact.name on @channel")
         self.assertEqual(self.frank.msgs.get(broadcast=broadcast2).text, "Hi @contact.name on @channel")
-
-    def test_clear_old_msg_external_ids(self):
-        last_month = timezone.now() - timedelta(days=31)
-        msg1 = self.create_msg(
-            contact=self.joe, text="What's your name?", direction="O", external_id="ex101", created_on=last_month
-        )
-        msg2 = self.create_msg(
-            contact=self.joe, text="It's Joe", direction="I", external_id="ex102", created_on=last_month
-        )
-        msg3 = self.create_msg(contact=self.joe, text="Good name", direction="O", external_id="ex103")
-
-        clear_old_msg_external_ids()
-
-        msg1.refresh_from_db()
-        msg2.refresh_from_db()
-        msg3.refresh_from_db()
-
-        self.assertIsNone(msg1.external_id)
-        self.assertIsNone(msg2.external_id)
-        self.assertEqual(msg3.external_id, "ex103")
 
 
 class BroadcastCRUDLTest(TembaTest):

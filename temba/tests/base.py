@@ -197,6 +197,20 @@ class TembaTestMixin:
                     return action
         self.fail("Couldn't find action with uuid %s" % uuid)
 
+    def get_goflow(self, filename, substitutions=None):
+        definition = json.loads(self.get_import_json("goflow/" + filename, substitutions=substitutions))
+
+        # get our name
+        name = definition["name"]
+
+        # create the flow
+        flow = Flow.create(self.org, self.admin, name, use_new_editor=True)
+
+        # save a revision
+        flow.save_revision(self.admin, definition)
+
+        return flow
+
     def get_flow(self, filename, substitutions=None):
         last_flow = Flow.objects.all().order_by("-pk").first()
         self.import_file(filename, substitutions=substitutions)
@@ -488,7 +502,7 @@ class TembaTest(TembaTestMixin, SmartminTest):
 
         # create different user types
         self.non_org_user = self.create_user("NonOrg")
-        self.user = self.create_user("User")
+        self.user = self.create_user("User", ("Viewers",))
         self.editor = self.create_user("Editor")
         self.admin = self.create_user("Administrator")
         self.surveyor = self.create_user("Surveyor")
@@ -615,6 +629,13 @@ class TembaTest(TembaTestMixin, SmartminTest):
 
     def releaseRuns(self, delete=False):
         self.release(FlowRun.objects.all(), delete=delete)
+
+    def assertResponseError(self, response, field, message, status_code=400):
+        self.assertEqual(status_code, response.status_code)
+        body = response.json()
+        self.assertTrue(message, field in body)
+        self.assertTrue(message, isinstance(body[field], (list, tuple)))
+        self.assertIn(message, body[field])
 
 
 class FlowFileTest(TembaTest):

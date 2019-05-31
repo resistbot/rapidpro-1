@@ -3,7 +3,6 @@ import itertools
 import logging
 import mimetypes
 import os
-import random
 import re
 from collections import OrderedDict, defaultdict
 from datetime import datetime, timedelta
@@ -35,10 +34,11 @@ from django.utils.functional import cached_property
 from django.utils.text import slugify
 from django.utils.translation import ugettext_lazy as _
 
+from temba import mailroom
 from temba.archives.models import Archive
 from temba.bundles import get_brand_bundles, get_bundle_map
 from temba.locations.models import AdminBoundary, BoundaryAlias
-from temba.utils import analytics, chunk_list, languages
+from temba.utils import analytics, chunk_list, json, languages
 from temba.utils.cache import get_cacheable_attr, get_cacheable_result, incrby_existing
 from temba.utils.currencies import currency_for_country
 from temba.utils.dates import datetime_to_str, get_datetime_format, str_to_datetime
@@ -437,7 +437,6 @@ class Org(SmartModel):
     def is_whitelisted(self):
         return self.config.get(ORG_STATUS, None) == WHITELISTED
 
-    @transaction.atomic
     def import_app(self, data, user, site=None):
         from temba.flows.models import Flow
         from temba.campaigns.models import Campaign
@@ -461,11 +460,16 @@ class Org(SmartModel):
 
             data = FlowRevision.migrate_export(self, data, same_site, export_version)
 
-        # we need to import flows first, they will resolve to
-        # the appropriate ids and update our definition accordingly
-        Flow.import_flows(data, self, user, same_site)
-        Campaign.import_campaigns(data, self, user, same_site)
-        Trigger.import_triggers(data, self, user, same_site)
+        with transaction.atomic():
+            # we need to import flows first, they will resolve to
+            # the appropriate ids and update our definition accordingly
+            new_flows = Flow.import_flows(data, self, user, same_site)
+            Campaign.import_campaigns(data, self, user, same_site)
+            Trigger.import_triggers(data, self, user, same_site)
+
+        # with all the flows and dependencies committed, we can now have mailroom do full validation
+        for flow in new_flows:
+            mailroom.get_client().flow_validate(self, flow.as_json())
 
     @classmethod
     def export_definitions(cls, site_link, components):
@@ -1101,16 +1105,19 @@ class Org(SmartModel):
         return datetime_to_str(datetime, format, self.timezone)
 
     def parse_datetime(self, datetime_string):
-        if isinstance(datetime_string, datetime):
-            return datetime_string
+        if not (isinstance(datetime_string, str)):
+            raise ValueError(f"parse_datetime called with param of type: {type(datetime_string)}, expected string")
 
         return str_to_datetime(datetime_string, self.timezone, self.get_dayfirst())
 
     def parse_number(self, decimal_string):
-        parsed = None
+        if not (isinstance(decimal_string, str)):
+            raise ValueError(f"parse_number called with param of type: {type(decimal_string)}, expected string")
 
+        parsed = None
         try:
             parsed = Decimal(decimal_string)
+
             if not parsed.is_finite() or parsed > Decimal("999999999999999999999999"):
                 parsed = None
         except Exception:
@@ -1351,28 +1358,25 @@ class Org(SmartModel):
         )
 
     def create_sample_flows(self, api_url):
-        import json
-
         # get our sample dir
         filename = os.path.join(settings.STATICFILES_DIRS[0], "examples", "sample_flows.json")
 
         # for each of our samples
         with open(filename, "r") as example_file:
-            example = example_file.read()
+            samples = example_file.read()
 
         user = self.get_user()
         if user:
             # some some substitutions
-            org_example = example.replace("{{EMAIL}}", user.username)
-            org_example = org_example.replace("{{API_URL}}", api_url)
+            samples = samples.replace("{{EMAIL}}", user.username).replace("{{API_URL}}", api_url)
 
             try:
-                self.import_app(json.loads(org_example), user)
+                self.import_app(json.loads(samples), user)
             except Exception as e:  # pragma: needs cover
                 logger.error(
                     f"Failed creating sample flows: {str(e)}",
                     exc_info=True,
-                    extra=dict(definition=json.loads(org_example)),
+                    extra=dict(definition=json.loads(samples)),
                 )
 
     def is_notified_of_mt_sms(self):
@@ -1489,6 +1493,35 @@ class Org(SmartModel):
         """
         return self.get_credits_total() - self.get_credits_used()
 
+    def select_most_recent_topup(self, amount):
+        """
+        Determines the active topup with latest expiry date and returns that
+        along with how many credits we will be able to decrement from it. Amount
+        decremented is not guaranteed to be the full amount requested.
+        """
+        # if we have an active topup cache, we need to decrement the amount remaining
+        non_expired_topups = self.topups.filter(is_active=True, expires_on__gte=timezone.now()).order_by(
+            "-expires_on", "id"
+        )
+        active_topups = (
+            non_expired_topups.annotate(used_credits=Sum("topupcredits__used"))
+            .filter(credits__gt=0)
+            .filter(Q(used_credits__lt=F("credits")) | Q(used_credits=None))
+        )
+        active_topup = active_topups.first()
+
+        if active_topup:
+            available_credits = active_topup.get_remaining()
+
+            if amount > available_credits:
+                # use only what is available
+                return active_topup.id, available_credits
+            else:
+                # use the full amount
+                return active_topup.id, amount
+        else:  # pragma: no cover
+            return None, 0
+
     def allocate_credits(self, user, org, amount):
         """
         Allocates credits to a sub org of the current org, but only if it
@@ -1504,7 +1537,7 @@ class Org(SmartModel):
                     while amount or debited == 0:
 
                         # remove the credits from ourselves
-                        (topup_id, debited) = self.decrement_credit(amount)
+                        (topup_id, debited) = self.select_most_recent_topup(amount)
 
                         if topup_id:
                             topup = TopUp.objects.get(id=topup_id)
@@ -1542,24 +1575,27 @@ class Org(SmartModel):
         # couldn't allocate credits
         return False
 
-    def decrement_credit(self, amount=1):
+    def decrement_credit(self):
         """
         Decrements this orgs credit by amount.
 
         Determines the active topup and returns that along with how many credits we were able
         to decrement it by. Amount decremented is not guaranteed to be the full amount requested.
         """
+        # amount is hardcoded to `1` in database triggers that handle TopUpCredits relation when sending messages
+        AMOUNT = 1
+
         r = get_redis_connection()
 
         # we always consider this a credit 'used' since un-applied msgs are pending
         # credit expenses for the next purchased topup
-        incrby_existing(ORG_CREDITS_USED_CACHE_KEY % self.id, amount)
+        incrby_existing(ORG_CREDITS_USED_CACHE_KEY % self.id, AMOUNT)
 
         # if we have an active topup cache, we need to decrement the amount remaining
         active_topup_id = self.get_active_topup_id()
         if active_topup_id:
 
-            remaining = r.decr(ORG_ACTIVE_TOPUP_REMAINING % (self.id, active_topup_id), amount)
+            remaining = r.decr(ORG_ACTIVE_TOPUP_REMAINING % (self.id, active_topup_id), AMOUNT)
 
             # near the edge, clear out our cache and calculate from the db
             if not remaining or int(remaining) < 100:
@@ -1571,13 +1607,11 @@ class Org(SmartModel):
             active_topup = self.get_active_topup(force_dirty=True)
             if active_topup:
                 active_topup_id = active_topup.id
-                remaining = active_topup.get_remaining()
-                if amount > remaining:
-                    amount = remaining
-                r.decr(ORG_ACTIVE_TOPUP_REMAINING % (self.id, active_topup.id), amount)
+
+                r.decr(ORG_ACTIVE_TOPUP_REMAINING % (self.id, active_topup.id), AMOUNT)
 
         if active_topup_id:
-            return (active_topup_id, amount)
+            return (active_topup_id, AMOUNT)
 
         return None, 0
 
@@ -1722,7 +1756,7 @@ class Org(SmartModel):
 
         # build an ordered dictionary of key->contact field
         fields = OrderedDict()
-        for cf in ContactField.user_fields.filter(org=self, is_active=True).order_by("key"):
+        for cf in ContactField.user_fields.active_for_org(org=self).order_by("key"):
             cf.org = self
             fields[cf.key] = cf
 
@@ -2045,16 +2079,19 @@ class Org(SmartModel):
         """
         from temba.middleware import BrandingMiddleware
 
-        self.flow_server_enabled = flow_server_enabled
-        self.save(update_fields=["flow_server_enabled"])
+        with transaction.atomic():
+            self.flow_server_enabled = flow_server_enabled
+            self.save(update_fields=["flow_server_enabled"])
 
-        if not branding:
-            branding = BrandingMiddleware.get_branding_for_host("")
+            if not branding:
+                branding = BrandingMiddleware.get_branding_for_host("")
 
-        self.create_system_groups()
-        self.create_system_contact_fields()
+            self.create_system_groups()
+            self.create_system_contact_fields()
+            self.create_welcome_topup(topup_size)
+
+        # outside of the transaction as it's going to call out to mailroom for flow validation
         self.create_sample_flows(branding.get("api_link", ""))
-        self.create_welcome_topup(topup_size)
 
     def download_and_save_media(self, request, extension=None):  # pragma: needs cover
         """
@@ -2191,7 +2228,7 @@ class Org(SmartModel):
         self.airtime_transfers.all().delete()
 
         # delete our contacts
-        for contact in self.org_contacts.all():
+        for contact in self.contacts.all():
             contact.release(contact.modified_by)
             contact.delete()
 
@@ -2485,14 +2522,6 @@ class Invitation(SmartModel):
             self.secret = secret
 
         return super().save(*args, **kwargs)
-
-    @classmethod
-    def generate_random_string(cls, length):  # pragma: needs cover
-        """
-        Generates a [length] characters alpha numeric secret
-        """
-        letters = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"  # avoid things that could be mistaken ex: 'I' and '1'
-        return "".join([random.choice(letters) for _ in range(length)])
 
     def send_invitation(self):
         from .tasks import send_invitation_email_task

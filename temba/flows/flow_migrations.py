@@ -4,7 +4,6 @@ from uuid import uuid4
 
 import regex
 
-from temba.channels.models import Channel
 from temba.contacts.models import ContactField, ContactGroup
 from temba.flows.models import (
     ContainsAnyTest,
@@ -53,10 +52,10 @@ def migrate_to_version_11_12(json_flow, flow=None):
                 channel_uuid = action.get("channel")
                 channel_name = action.get("name")
                 if channel_uuid is not None:
-                    channel = Channel.objects.filter(is_active=True, uuid=channel_uuid).first()
+                    channel = flow.org.channels.filter(is_active=True, uuid=channel_uuid).first()
 
                 if channel is None and channel_name is not None:
-                    channel = Channel.objects.filter(is_active=True, name=channel_name).first()
+                    channel = flow.org.channels.filter(is_active=True, name=channel_name).first()
 
                 if channel is None:
                     # skip this action it is invalid
@@ -68,11 +67,11 @@ def migrate_to_version_11_12(json_flow, flow=None):
             # the action is valid append it
             valid_actions.append(action)
 
+        action_set_clone["actions"] = valid_actions
         if len(valid_actions) > 0:
-            action_set_clone["actions"] = valid_actions
             new_flow_json[Flow.ACTION_SETS].append(action_set_clone)
         else:
-            reroute_uuid_remap[action_set["uuid"]] = action_set["destination"]
+            reroute_uuid_remap[action_set["uuid"]] = action_set.get("destination")
             needs_move_entry = True
 
     action_sets = new_flow_json.get(Flow.ACTION_SETS, [])
@@ -126,7 +125,7 @@ def migrate_to_version_11_11(json_flow, flow=None):
         # labels can be single string expressions
         if type(label) is dict:
             # we haven't been mapped yet (also, non-uuid labels can't be mapped)
-            if "uuid" not in label or label["uuid"] not in uuid_map:
+            if ("uuid" not in label or label["uuid"] not in uuid_map) and Label.is_valid_name(label["name"]):
                 label_instance = Label.get_or_create(flow.org, flow.created_by, label["name"])
 
                 # map label references that started with a uuid
@@ -742,6 +741,9 @@ def migrate_export_to_version_11_0(json_export, org, same_site=True):
                 elif rs_type and test != rs_type:
                     rs_type = "none"
 
+            if rs["label"] is None:
+                continue
+
             key = Flow.label_to_slug(rs["label"])
 
             # any reference to this result value's time property needs wrapped in format_date
@@ -773,10 +775,11 @@ def migrate_export_to_version_11_0(json_export, org, same_site=True):
                             text = next(iter(text.values()))
 
                         migrated_text = text
-                        for pattern, replacement in replacements:
-                            migrated_text = regex.sub(
-                                pattern, replacement, migrated_text, flags=regex.UNICODE | regex.MULTILINE
-                            )
+                        if isinstance(migrated_text, str):
+                            for pattern, replacement in replacements:
+                                migrated_text = regex.sub(
+                                    pattern, replacement, migrated_text, flags=regex.UNICODE | regex.MULTILINE
+                                )
 
                         msg[lang] = migrated_text
 
@@ -1054,7 +1057,7 @@ def migrate_export_to_version_9(exported_json, org, same_site=True):
     for trigger in exported_json.get("triggers", []):
         if "flow" in trigger:
             remap_flow(trigger["flow"])
-        for group in trigger["groups"]:
+        for group in trigger["groups"]:  # pragma: no cover
             remap_group(group)
         remap_channel(trigger)
 
@@ -1078,7 +1081,7 @@ def migrate_to_version_9(json_flow, flow):
     from temba.flows.models import Flow
 
     if Flow.METADATA not in json_flow:
-        json_flow[Flow.METADATA] = flow.get_metadata()
+        json_flow[Flow.METADATA] = flow.get_legacy_metadata()
     return migrate_export_to_version_9(dict(flows=[json_flow]), flow.org)["flows"][0]
 
 

@@ -25,6 +25,7 @@ from temba.assets.models import register_asset_store
 from temba.channels.courier import push_courier_msgs
 from temba.channels.models import Channel, ChannelEvent, ChannelLog
 from temba.contacts.models import URN, Contact, ContactGroup, ContactGroupCount, ContactURN
+from temba.mailroom.queue import queue_mailroom_msg_task
 from temba.orgs.models import Language, Org, TopUp
 from temba.schedules.models import Schedule
 from temba.utils import analytics, chunk_list, extract_constants, get_anonymous_user, json, on_transaction_commit
@@ -116,23 +117,6 @@ class UnreachableException(Exception):
     pass
 
 
-class BroadcastRecipient(models.Model):
-    """
-    Through table for broadcast recipients many-to-many
-    """
-
-    broadcast = models.ForeignKey("msgs.Broadcast", on_delete=models.PROTECT)
-
-    contact = models.ForeignKey(Contact, on_delete=models.PROTECT)
-
-    purged_status = models.CharField(
-        null=True, max_length=1, help_text=_("Used when broadcast is purged to record contact's message's state")
-    )
-
-    class Meta:
-        db_table = "msgs_broadcast_recipients"
-
-
 class Broadcast(models.Model):
     """
     A broadcast is a message that is sent out to more than one recipient, such
@@ -169,14 +153,6 @@ class Broadcast(models.Model):
         verbose_name=_("URNs"),
         related_name="addressed_broadcasts",
         help_text=_("Individual URNs included in this message"),
-    )
-
-    recipients = models.ManyToManyField(
-        Contact,
-        through=BroadcastRecipient,
-        verbose_name=_("Recipients"),
-        related_name="broadcasts",
-        help_text=_("The contacts which received this message"),
     )
 
     recipient_count = models.IntegerField(
@@ -1421,6 +1397,47 @@ class Msg(models.Model):
             return self.text
 
     @classmethod
+    def create_relayer_incoming(cls, org, channel, urn, text, received_on, attachments=None):
+        from temba.api.models import WebHookEvent
+
+        # get / create our contact and URN
+        contact, contact_urn = Contact.get_or_create(org, urn, channel, init_new=False)
+
+        # we limit our text message length and remove any invalid chars
+        if text:
+            text = clean_string(text[: cls.MAX_TEXT_LEN])
+
+        now = timezone.now()
+
+        # don't create duplicate messages
+        existing = Msg.objects.filter(text=text, sent_on=received_on, contact=contact, direction="I").first()
+        if existing:
+            return existing
+
+        msg = Msg.objects.create(
+            org=org,
+            channel=channel,
+            contact=contact,
+            contact_urn=contact_urn,
+            text=text,
+            sent_on=received_on,
+            created_on=now,
+            modified_on=now,
+            queued_on=now,
+            direction=INCOMING,
+            attachments=attachments,
+            status=PENDING,
+        )
+
+        # trigger a webhook event for the MO message
+        WebHookEvent.trigger_sms_event(WebHookEvent.TYPE_SMS_RECEIVED, msg, received_on)
+
+        # pass off handling of the message to mailroom after we commit
+        on_transaction_commit(lambda: queue_mailroom_msg_task(msg))
+
+        return msg
+
+    @classmethod
     def create_incoming(
         cls,
         channel,
@@ -1471,7 +1488,7 @@ class Msg(models.Model):
 
         # don't create duplicate messages
         existing = Msg.objects.filter(text=text, sent_on=sent_on, contact=contact, direction="I").first()
-        if existing:
+        if existing:  # pragma: no cover
             return existing
 
         # costs 1 credit to receive a message
