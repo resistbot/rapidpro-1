@@ -864,7 +864,6 @@ CELERYBEAT_SCHEDULE = {
 # Mapping of task name to task function path, used when CELERY_ALWAYS_EAGER is set to True
 CELERY_TASK_MAP = {
     "send_msg_task": "temba.channels.tasks.send_msg_task",
-    "start_msg_flow_batch": "temba.flows.tasks.start_msg_flow_batch_task",
     "handle_event_task": "temba.msgs.tasks.handle_event_task",
 }
 
@@ -953,9 +952,6 @@ for brand in BRANDING.values():
     context["brand"] = dict(slug=brand["slug"], styles=brand["styles"])
     COMPRESS_OFFLINE_CONTEXT.append(context)
 
-MAGE_API_URL = "http://localhost:8026/api/v1"
-MAGE_AUTH_TOKEN = None  # should be same token as configured on Mage side
-
 # -----------------------------------------------------------------------------------
 # RapidPro configuration settings
 # -----------------------------------------------------------------------------------
@@ -1001,6 +997,7 @@ CHANNEL_TYPES = [
     "temba.channels.types.whatsapp.WhatsAppType",
     "temba.channels.types.twilio.TwilioType",
     "temba.channels.types.twilio_messaging_service.TwilioMessagingServiceType",
+    "temba.channels.types.signalwire.SignalWireType",
     "temba.channels.types.nexmo.NexmoType",
     "temba.channels.types.africastalking.AfricasTalkingType",
     "temba.channels.types.blackmyna.BlackmynaType",

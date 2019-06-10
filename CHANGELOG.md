@@ -1,3 +1,26 @@
+v4.23.3
+----------
+ * Send broadcasts through mailroom
+ * Add org name in the email subject for exports
+ * Add org name in export filename
+
+v4.24.0
+----------
+ * Add org name in the export email subject and filename
+ * Update flow editor to 1.5.9
+ * Remove functionality for handling legacy surveyor submissions
+
+v4.23.1
+----------
+ * Make exported fields match goflow representation and add .as_export_ref() to exportable classes
+ * Update to latest floweditor v1.5.5
+ * Persist group and field definitions in exports
+ * Add support for SignalWire (https://signalwire.com) for SMS and IVR
+
+v4.23.0
+----------
+ * Save channel and message label dependencies on flows
+
 v4.22.63
 ----------
  * Update to latest floweditor v1.5.5

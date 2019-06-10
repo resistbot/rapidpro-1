@@ -28,7 +28,7 @@ from django.utils import timezone
 from django.utils.http import urlquote_plus
 from django.utils.translation import ugettext_lazy as _
 
-from temba.mailroom.queue import queue_mailroom_mo_miss_task
+from temba import mailroom
 from temba.orgs.models import NEXMO_APP_ID, NEXMO_APP_PRIVATE_KEY, NEXMO_KEY, NEXMO_SECRET, Org
 from temba.utils import analytics, get_anonymous_user, json, on_transaction_commit
 from temba.utils.email import send_template_email
@@ -98,7 +98,7 @@ class ChannelType(metaclass=ABCMeta):
     ivr_protocol = None
 
     # Whether this channel should be activated in the a celery task, useful to turn off if there's a chance for errors
-    #  during activation. Channels should make sure their claim view is non-atomic if a callback will be involved
+    # during activation. Channels should make sure their claim view is non-atomic if a callback will be involved
     async_activation = True
 
     def is_available_to(self, user):
@@ -1028,6 +1028,11 @@ class Channel(TembaModel):
         """
         Releases this channel making it inactive
         """
+
+        dependent_flows_count = self.dependent_flows.count()
+        if dependent_flows_count > 0:
+            raise ValueError(f"Cannot delete Channel: {self.get_name()}, used by {dependent_flows_count} flows")
+
         channel_type = self.get_type()
 
         # release any channels working on our behalf as well
@@ -1431,7 +1436,7 @@ class ChannelEvent(models.Model):
 
         if event_type == cls.TYPE_CALL_IN_MISSED:
             # pass off handling of the message to mailroom after we commit
-            on_transaction_commit(lambda: queue_mailroom_mo_miss_task(event))
+            on_transaction_commit(lambda: mailroom.queue_mo_miss_event(event))
 
         return event
 

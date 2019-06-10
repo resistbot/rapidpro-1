@@ -13,6 +13,7 @@ from smartmin.tests import SmartminTestMixin, _CRUDLTest
 
 from django.conf import settings
 from django.core.files.base import ContentFile
+from django.db import connection
 from django.db.models import Value as DbValue
 from django.db.models.functions import Concat, Substr
 from django.test import TestCase, TransactionTestCase
@@ -396,7 +397,7 @@ class ContactGroupTest(TembaTest):
         self.assertEqual(ContactGroup.get_or_create(self.org, self.user, "  FIRST"), group)
 
         # fetching by id shouldn't modify original group
-        self.assertEqual(ContactGroup.get_or_create(self.org, self.user, "Kigali", group.uuid), group)
+        self.assertEqual(ContactGroup.get_or_create(self.org, self.user, "Kigali", uuid=group.uuid), group)
 
         group.refresh_from_db()
         self.assertEqual(group.name, "first")
@@ -3588,7 +3589,7 @@ class ContactTest(TembaTest):
             )
 
             # fetch our contact history
-            with self.assertNumQueries(68):
+            with self.assertNumQueries(67):
                 response = self.fetch_protected(url, self.admin)
 
             # activity should include all messages in the last 90 days, the channel event, the call, and the flow run
@@ -4128,12 +4129,6 @@ class ContactTest(TembaTest):
         self.joe_and_frank = self.create_group("Joe and Frank", [self.joe, self.frank])
 
         self.joe_and_frank = ContactGroup.user_groups.get(pk=self.joe_and_frank.pk)
-
-        self.assertEqual(self.joe.groups_as_text(), "Joe and Frank, Just Joe")
-        group_analytic_json = self.joe_and_frank.analytics_json()
-        self.assertEqual(group_analytic_json["id"], self.joe_and_frank.pk)
-        self.assertEqual(group_analytic_json["name"], "Joe and Frank")
-        self.assertEqual(2, group_analytic_json["count"])
 
         # try to list contacts as a user not in the organization
         self.login(self.user1)
@@ -8161,9 +8156,6 @@ class ESIntegrationTest(TembaTestMixin, SmartminTestMixin, TransactionTestCase):
 
         self.client.login(username=self.admin.username, password=self.admin.username)
 
-        # block the default contacts, these should be ignored in our searches
-        Contact.objects.all().update(is_active=False, is_blocked=True)
-
         age = ContactField.get_or_create(self.org, self.admin, "age", "Age", value_type="N")
         ContactField.get_or_create(self.org, self.admin, "join_date", "Join Date", value_type="D")
         ContactField.get_or_create(self.org, self.admin, "state", "Home State", value_type="S")
@@ -8178,8 +8170,11 @@ class ESIntegrationTest(TembaTestMixin, SmartminTestMixin, TransactionTestCase):
         wards = ["Kageyo", "Kabara", "Bukure", None]
         date_format = get_datetime_format(True)[0]
 
-        # create some contacts
+        # reset contact ids so we don't get unexpected collisions with phone numbers
+        with connection.cursor() as cursor:
+            cursor.execute("""SELECT setval(pg_get_serial_sequence('"contacts_contact"','id'), 900)""")
 
+        # create some contacts
         for i in range(90):
             name = names[i % len(names)]
 
