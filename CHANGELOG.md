@@ -1,3 +1,49 @@
+v5.0.1
+----------
+ * Fix max length for WA claim facebook_access_token
+ * Fix WhatsApp number formatting on contact page, add icon
+
+v5.0.0
+----------
+ * add validation of localized messages to Travis
+
+v4.27.3
+----------
+ * Make contact.is_test nullable
+ * Migration to remove orphaned schedules and changes to prevent creating them in future
+ * Migration to merge path counts from rules which are merged into a single exit in new engine
+
+v4.27.2
+----------
+ * fix broadcast API test
+
+v4.27.1
+----------
+ * temporarily increase throttling on broadcasts endpoint
+
+v4.27.0
+----------
+ * Cleanup webhook fields left on Org
+ * Stop checking flow_server_enabled and remove support for editing it
+
+v4.26.1
+----------
+ * Remove no longer used check_campaigns_task
+
+v4.26.0
+----------
+ * Remove handling of incoming messages, channel events and campaigns.. all of which is now handled by mailroom
+
+v4.25.0
+----------
+ * Add sentry error to handle_event_task as it shouldnt be handling anything
+ * Remove processing of timeouts which is now handled by mailroom
+ * Start broadcast mailroom tasks with HIGH_PRIORITY
+ * Fix EX settings page load
+ * Migration to convert any remaining orgs to use mailroom
+ * Fix broken links to webhook docs
+ * Simplify WebHookEvent model
+
 v4.23.3
 ----------
  * Send broadcasts through mailroom
