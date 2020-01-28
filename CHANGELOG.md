@@ -1,3 +1,17 @@
+v5.3.38
+----------
+ * Use mailroom for contact searches, contact list pages and flow starts via search
+
+v5.3.35
+----------
+ * Rebuild components
+
+v5.3.34
+----------
+ * Update to flow editor 1.7.13
+ * Don't include 'version' in current definitions
+ * Migrate imports of flows to new spec by default
+
 v5.3.30
 ----------
  * Exclude inactive template translations from API endpoint
