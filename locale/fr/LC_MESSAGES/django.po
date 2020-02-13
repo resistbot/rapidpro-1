@@ -12,7 +12,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: TextIt\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2020-01-23 17:52+0000\n"
+"POT-Creation-Date: 2020-02-11 21:03+0000\n"
 "PO-Revision-Date: 2014-09-24 19:57+0000\n"
 "Last-Translator: TextIt <info@textit.in>\n"
 "Language-Team: French (http://www.transifex.com/projects/p/textit/language/fr/)\n"
@@ -3296,6 +3296,14 @@ msgstr "ID externe"
 msgid "Freshchat identifier"
 msgstr "ID externe"
 
+#, fuzzy
+#| msgid "UUID"
+msgid "ID"
+msgstr "UUID"
+
+msgid "Language"
+msgstr "Langue"
+
 msgid "Label"
 msgstr "Etiquette"
 
@@ -3310,9 +3318,6 @@ msgstr ""
 
 msgid "The name of this contact"
 msgstr "Le nom de ce contact"
-
-msgid "Language"
-msgstr "Langue"
 
 msgid "The preferred language for this contact"
 msgstr ""
@@ -3433,25 +3438,7 @@ msgstr ""
 msgid "Unrecognized contact field type '{prop_type}'"
 msgstr ""
 
-#, python-brace-format
-msgid "Unknown attribute comparator: '{self.comparator}'"
-msgstr ""
-
-#, python-brace-format
-msgid "Unknown attribute field '{field}'"
-msgstr ""
-
-#, python-brace-format
-msgid "Unknown scheme comparator: '{self.comparator}'"
-msgstr ""
-
 msgid "Invalid operator for empty string comparison"
-msgstr ""
-
-msgid "All contacts have an 'id', it's not possible to check if 'id' is set"
-msgstr ""
-
-msgid "All contacts have a 'created_on', it's not possible to check if 'created_on' is set"
 msgstr ""
 
 #, fuzzy
@@ -3487,10 +3474,10 @@ msgstr ""
 msgid "This org has %(count)d groups and the limit is %(limit)d. You must delete existing ones before you can create new ones."
 msgstr ""
 
-msgid "You cannot update the query of a group that is evaluating."
+msgid "You cannot create a dynamic group based on \"id\"."
 msgstr ""
 
-msgid "You cannot create a dynamic group based on \"name\" or \"id\"."
+msgid "You cannot update the query of a group that is evaluating."
 msgstr ""
 
 msgid "All Contacts"
@@ -3722,24 +3709,6 @@ msgstr "La langue principale pour éditer ce flux"
 #, fuzzy
 msgid "The flow version this definition is in"
 msgstr "Le fuseau horaire de votre organisation"
-
-#, fuzzy
-#| msgid "Any labels on this flow"
-msgid "Any flows this flow uses"
-msgstr "Tout label sur ce flux"
-
-msgid "Group Dependencies"
-msgstr ""
-
-#, fuzzy
-#| msgid "Any labels on this flow"
-msgid "Any groups this flow uses"
-msgstr "Tout label sur ce flux"
-
-#, fuzzy
-#| msgid "Any labels on this flow"
-msgid "Any fields this flow depends on"
-msgstr "Tout label sur ce flux"
 
 #, fuzzy
 #| msgid "Deleted"
@@ -4787,11 +4756,6 @@ msgstr ""
 
 msgid "The parent org that manages this org"
 msgstr ""
-
-#, fuzzy
-#| msgid "UUID"
-msgid "ID"
-msgstr "UUID"
 
 #, python-format
 msgid "Invalid bundle: %s, cannot upgrade."
@@ -11648,6 +11612,21 @@ msgstr "Entrez le code Claim"
 #, python-brace-format
 msgid "Found ${count} for ${query}"
 msgstr ""
+
+#, fuzzy
+#~| msgid "Any labels on this flow"
+#~ msgid "Any flows this flow uses"
+#~ msgstr "Tout label sur ce flux"
+
+#, fuzzy
+#~| msgid "Any labels on this flow"
+#~ msgid "Any groups this flow uses"
+#~ msgstr "Tout label sur ce flux"
+
+#, fuzzy
+#~| msgid "Any labels on this flow"
+#~ msgid "Any fields this flow depends on"
+#~ msgstr "Tout label sur ce flux"
 
 #, fuzzy
 #~| msgid "Please enter at least 8 characters"

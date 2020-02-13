@@ -1,6 +1,7 @@
-import copy
+import subprocess
+import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import PropertyMock, patch
 
@@ -8,13 +9,14 @@ import pytz
 from openpyxl import load_workbook
 from smartmin.csv_imports.models import ImportTask
 from smartmin.models import SmartImportRowError
-from smartmin.tests import _CRUDLTest
+from smartmin.tests import SmartminTestMixin, _CRUDLTest
 
 from django.conf import settings
 from django.core.files.base import ContentFile
+from django.db import connection
 from django.db.models import Value as DbValue
 from django.db.models.functions import Concat, Substr
-from django.test import TestCase
+from django.test import TestCase, TransactionTestCase
 from django.test.utils import override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -24,7 +26,8 @@ from temba.api.models import WebHookResult
 from temba.campaigns.models import Campaign, CampaignEvent, EventFire
 from temba.channels.models import Channel, ChannelEvent, ChannelLog
 from temba.contacts.models import DELETED_SCHEME
-from temba.contacts.search import contact_es_search, evaluate_query, is_phonenumber
+from temba.contacts.search import SearchException, SearchResults, evaluate_query, is_phonenumber, search_contacts
+from temba.contacts.search.tests import MockParseQuery
 from temba.contacts.views import ContactListView
 from temba.flows.models import Flow, FlowRun
 from temba.ivr.models import IVRCall
@@ -33,11 +36,11 @@ from temba.mailroom import MailroomException
 from temba.msgs.models import Broadcast, Label, Msg, SystemLabel
 from temba.orgs.models import Org
 from temba.schedules.models import Schedule
-from temba.tests import AnonymousOrg, ESMockWithScroll, ESMockWithScrollMultiple, TembaTest, TembaTestMixin
+from temba.tests import AnonymousOrg, ESMockWithScroll, MockPost, TembaTest, TembaTestMixin
 from temba.tests.engine import MockSessionWriter
 from temba.triggers.models import Trigger
 from temba.utils import json
-from temba.utils.dates import datetime_to_ms
+from temba.utils.dates import datetime_to_ms, datetime_to_str
 from temba.values.constants import Value
 
 from .models import (
@@ -52,15 +55,7 @@ from .models import (
     ContactURN,
     ExportContactsTask,
 )
-from .search import (
-    BoolCombination,
-    Condition,
-    ContactQuery,
-    IsSetCondition,
-    SearchException,
-    SinglePropCombination,
-    parse_query,
-)
+from .search import BoolCombination, Condition, ContactQuery, IsSetCondition, SinglePropCombination, legacy_parse_query
 from .tasks import check_elasticsearch_lag, squash_contactgroupcounts
 from .templatetags.contacts import contact_field, history_class, history_icon
 
@@ -119,7 +114,9 @@ class ContactCRUDLTest(TembaTestMixin, _CRUDLTest):
         self.frank, urn_obj = Contact.get_or_create(self.org, "tel:124", user=self.user, name="Frank")
         self.frank.set_field(self.user, "age", "18")
 
-        ContactGroup.create_static(self.org, self.user, "Group being created", status=ContactGroup.STATUS_INITIALIZING)
+        creating = ContactGroup.create_static(
+            self.org, self.user, "Group being created", status=ContactGroup.STATUS_INITIALIZING
+        )
 
         response = self._do_test_view("list")
         self.assertEqual(set(response.context["object_list"]), {self.frank, self.joe})
@@ -131,6 +128,14 @@ class ContactCRUDLTest(TembaTestMixin, _CRUDLTest):
         self.assertEqual(
             response.context["groups"],
             [
+                {
+                    "uuid": str(creating.uuid),
+                    "pk": creating.id,
+                    "label": "Group being created",
+                    "is_dynamic": False,
+                    "is_ready": False,
+                    "count": 0,
+                },
                 {
                     "uuid": str(survey_audience.uuid),
                     "pk": survey_audience.id,
@@ -353,19 +358,7 @@ class ContactGroupTest(TembaTest):
         self.mary.set_field(self.admin, "gender", "female")
 
         # create a dynamic group using a query
-        mock_es_data = [
-            {
-                "_type": "_doc",
-                "_index": "dummy_index",
-                "_source": {"id": self.joe.id, "modified_on": self.joe.modified_on.isoformat()},
-            },
-            {
-                "_type": "_doc",
-                "_index": "dummy_index",
-                "_source": {"id": self.mary.id, "modified_on": self.mary.modified_on.isoformat()},
-            },
-        ]
-        with ESMockWithScroll(data=mock_es_data):
+        with MockParseQuery('(age < 18 AND gender = "male") OR (age > 18 AND gender = "female")', ["age", "gender"]):
             group = ContactGroup.create_dynamic(
                 self.org, self.admin, "Group two", '(Age < 18 and gender = "male") or (Age > 18 and gender = "female")'
             )
@@ -373,31 +366,23 @@ class ContactGroupTest(TembaTest):
         group.refresh_from_db()
         self.assertEqual(group.query, '(age < 18 AND gender = "male") OR (age > 18 AND gender = "female")')
         self.assertEqual(set(group.query_fields.all()), {age, gender})
-        self.assertEqual(set(group.contacts.all()), {self.joe, self.mary})
-        self.assertEqual(group.status, ContactGroup.STATUS_READY)
+        self.assertEqual(group.status, ContactGroup.STATUS_INITIALIZING)
 
         # update group query
-        mock_es_data = [
-            {
-                "_type": "_doc",
-                "_index": "dummy_index",
-                "_source": {"id": self.mary.id, "modified_on": self.mary.modified_on.isoformat()},
-            }
-        ]
-        with ESMockWithScroll(data=mock_es_data):
+        with MockParseQuery('age > 18 AND name ~ "Mary"', ["age", "name"]):
             group.update_query("age > 18 and name ~ Mary")
 
         group.refresh_from_db()
         self.assertEqual(group.query, 'age > 18 AND name ~ "Mary"')
         self.assertEqual(set(group.query_fields.all()), {age, name})
-        self.assertEqual(set(group.contacts.all()), {self.mary})
-        self.assertEqual(group.status, ContactGroup.STATUS_READY)
+        self.assertEqual(group.status, ContactGroup.STATUS_INITIALIZING)
 
         # can't create a dynamic group with empty query
         self.assertRaises(ValueError, ContactGroup.create_dynamic, self.org, self.admin, "Empty", "")
 
         # can't create a dynamic group with id attribute
-        self.assertRaises(ValueError, ContactGroup.create_dynamic, self.org, self.admin, "Bose", "id = 123")
+        with MockParseQuery("id = 123", ["id"]):
+            self.assertRaises(ValueError, ContactGroup.create_dynamic, self.org, self.admin, "Bose", "id = 123")
 
         # can't call update_contacts on a dynamic group
         self.assertRaises(ValueError, group.update_contacts, self.admin, [self.joe], True)
@@ -416,13 +401,10 @@ class ContactGroupTest(TembaTest):
         with self.assertRaises(ValueError):
             group.update_query("age = 18")
 
-        # can't call reevaluate on it while it is in this state
-        with self.assertRaises(ValueError):
-            group.reevaluate()
-
     def test_query_elasticsearch_for_ids_bad_query(self):
         with self.assertRaises(SearchException):
-            Contact.query_elasticsearch_for_ids(self.org, "bad_field <> error")
+            with MockParseQuery(error="bad field <> error"):
+                Contact.query_elasticsearch_for_ids(self.org, "bad_field <> error")
 
     def test_get_or_create(self):
         group = ContactGroup.get_or_create(self.org, self.user, " first ")
@@ -445,8 +427,9 @@ class ContactGroupTest(TembaTest):
         deleted.is_active = False
         deleted.save()
 
-        with ESMockWithScroll():
+        with MockParseQuery('gender = "M"', ["gender"]):
             dynamic = ContactGroup.create_dynamic(self.org, self.admin, "Dynamic", "gender=M")
+            ContactGroup.user_groups.filter(id=dynamic.id).update(status=ContactGroup.STATUS_READY)
 
         self.assertEqual(set(ContactGroup.get_user_groups(self.org)), {static, dynamic})
         self.assertEqual(set(ContactGroup.get_user_groups(self.org, dynamic=False)), {static})
@@ -742,7 +725,7 @@ class ContactGroupCRUDLTest(TembaTest):
 
         self.joe_and_frank = self.create_group("Customers", [self.joe, self.frank])
 
-        with ESMockWithScroll():
+        with MockParseQuery("tel = 1234", ["tel"]):
             self.dynamic_group = self.create_group("Dynamic", query="tel is 1234")
 
     @patch.object(ContactGroup, "MAX_ORG_CONTACTGROUPS", new=10)
@@ -779,18 +762,10 @@ class ContactGroupCRUDLTest(TembaTest):
         self.assertEqual(set(group.contacts.all()), {self.joe, self.frank})
 
         # create a dynamic group using a query
-        mock_es_data = [
-            {
-                "_type": "_doc",
-                "_index": "dummy_index",
-                "_source": {"id": self.frank.id, "modified_on": self.frank.modified_on.isoformat()},
-            }
-        ]
-        with ESMockWithScroll(data=mock_es_data):
+        with MockParseQuery("tel = 1234", ["tel"]):
             self.client.post(url, dict(name="Frank", group_query="tel = 1234"))
 
-        group = ContactGroup.user_groups.get(org=self.org, name="Frank", query="tel = 1234")
-        self.assertEqual(set(group.contacts.all()), {self.frank})
+        ContactGroup.user_groups.get(org=self.org, name="Frank", query="tel = 1234")
 
         self.setUpSecondaryOrg()
         self.release(ContactGroup.user_groups.all())
@@ -845,46 +820,47 @@ class ContactGroupCRUDLTest(TembaTest):
         # now try a dynamic group
         url = reverse("contacts.contactgroup_update", args=[self.dynamic_group.pk])
 
+        # mark our group as ready
+        ContactGroup.user_groups.filter(id=self.dynamic_group.pk).update(status=ContactGroup.STATUS_READY)
+
         # update both name and query, form should fail, because query is not parsable
-        response = self.client.post(url, dict(name="Frank", query="(!))!)"))
-        self.assertFormError(response, "form", "query", "Search query contains an error at: !")
+        with MockParseQuery(error="error at !"):
+            response = self.client.post(url, dict(name="Frank", query="(!))!)"))
+            self.assertFormError(response, "form", "query", "error at !")
 
         # try to update a group with an invalid query
-        response = self.client.post(url, dict(name="Frank", query="name <> some_name"))
-        self.assertFormError(response, "form", "query", "Search query contains an error at: >")
+        with MockPost({"error": "error at >"}, status=400):
+            response = self.client.post(url, dict(name="Frank", query="name <> some_name"))
+            self.assertFormError(response, "form", "query", "error at >")
 
-        response = self.client.post(url, dict(name="Frank", query="id = 123"))
-        self.assertFormError(response, "form", "query", 'You cannot create a dynamic group based on "name" or "id".')
+        # dependent on id
+        with MockParseQuery("id = 123", ["id"]):
+            response = self.client.post(url, dict(name="Frank", query="id = 123"))
+            self.assertFormError(response, "form", "query", 'You cannot create a dynamic group based on "id".')
 
-        # create a dynamic group using a query
-        mock_es_data = [
-            {
-                "_type": "_doc",
-                "_index": "dummy_index",
-                "_source": {"id": self.frank.id, "modified_on": self.frank.modified_on.isoformat()},
-            }
-        ]
-        with ESMockWithScroll(data=mock_es_data):
+        with MockParseQuery('twitter = "hola"', ["twitter"]):
             response = self.client.post(url, dict(name="Frank", query='twitter is "hola"'))
 
         self.assertNoFormErrors(response)
 
         self.dynamic_group.refresh_from_db()
-        self.assertEqual(self.dynamic_group.name, "Frank")
         self.assertEqual(self.dynamic_group.query, 'twitter = "hola"')
-        self.assertEqual(set(self.dynamic_group.contacts.all()), {self.frank})
 
         # mark our dynamic group as evaluating
         self.dynamic_group.status = ContactGroup.STATUS_EVALUATING
         self.dynamic_group.save(update_fields=("status",))
 
         # and check we can't change the query while that is the case
-        response = self.client.post(url, dict(name="Frank", query='twitter = "hello"'))
-        self.assertFormError(response, "form", "query", "You cannot update the query of a group that is evaluating.")
+        with MockParseQuery('twitter = "hello"', ["twitter"]):
+            response = self.client.post(url, dict(name="Frank", query='twitter = "hello"'))
+            self.assertFormError(
+                response, "form", "query", "You cannot update the query of a group that is evaluating."
+            )
 
         # but can change the name
-        response = self.client.post(url, dict(name="Frank2", query='twitter is "hola"'))
-        self.assertNoFormErrors(response)
+        with MockParseQuery('twitter = "hola"', ["twitter"]):
+            response = self.client.post(url, dict(name="Frank2", query='twitter is "hola"'))
+            self.assertNoFormErrors(response)
 
         self.dynamic_group.refresh_from_db()
         self.assertEqual(self.dynamic_group.name, "Frank2")
@@ -1250,7 +1226,7 @@ class ContactTest(TembaTest):
 
         # create a dynamic group and put joe in it
         ContactField.get_or_create(self.org, self.admin, "gender", "Gender")
-        with ESMockWithScroll():
+        with MockParseQuery('gender = "M"', ["gender"]):
             dynamic_group = self.create_group("Dynamic", query="gender is M")
 
         self.joe.set_field(self.admin, "gender", "M")
@@ -1407,54 +1383,24 @@ class ContactTest(TembaTest):
         ContactField.get_or_create(self.org, self.admin, "gender", "Gender")
         ContactField.get_or_create(self.org, self.admin, "age", "Age", value_type=Value.TYPE_NUMBER)
 
-        mock_es_data = [
-            {
-                "_type": "_doc",
-                "_index": "dummy_index",
-                "_source": {"id": self.joe.id, "modified_on": self.joe.modified_on.isoformat()},
-            }
-        ]
-        with ESMockWithScroll(data=mock_es_data):
+        with MockParseQuery('twitter != ""', ["twitter"]):
             has_twitter = self.create_group("Has twitter", query='twitter != ""')
 
-        mock_es_data = [
-            {
-                "_type": "_doc",
-                "_index": "dummy_index",
-                "_source": {"id": self.joe.id, "modified_on": self.joe.modified_on.isoformat()},
-            },
-            {
-                "_type": "_doc",
-                "_index": "dummy_index",
-                "_source": {"id": self.frank.id, "modified_on": self.frank.modified_on.isoformat()},
-            },
-            {
-                "_type": "_doc",
-                "_index": "dummy_index",
-                "_source": {"id": self.billy.id, "modified_on": self.billy.modified_on.isoformat()},
-            },
-            {
-                "_type": "_doc",
-                "_index": "dummy_index",
-                "_source": {"id": self.voldemort.id, "modified_on": self.voldemort.modified_on.isoformat()},
-            },
-        ]
-        with ESMockWithScroll(data=mock_es_data):
+        with MockParseQuery('gender = ""', ["gender"]):
             no_gender = self.create_group("No gender", query='gender is ""')
 
-        with ESMockWithScroll():
+        with MockParseQuery('gender = "m" or gender = "male"', ["gender"]):
             males = self.create_group("Male", query="gender is M or gender is Male")
+
+        with MockParseQuery("age > 18 or age < 30", ["age"]):
             youth = self.create_group("Male", query="age > 18 or age < 30")
 
-        mock_es_data = [
-            {
-                "_type": "_doc",
-                "_index": "dummy_index",
-                "_source": {"id": self.joe.id, "modified_on": self.joe.modified_on.isoformat()},
-            }
-        ]
-        with ESMockWithScroll(data=mock_es_data):
+        with MockParseQuery('twitter = "blow80"', ["twitter"]):
             joes = self.create_group("Joes", query='twitter = "blow80"')
+
+        # manually reevaluate all these contacts
+        for c in [self.joe, self.frank, self.billy, self.voldemort]:
+            c.handle_update(is_new=True)
 
         self.assertEqual(set(has_twitter.contacts.all()), {self.joe})
         self.assertEqual(set(no_gender.contacts.all()), {self.joe, self.frank, self.billy, self.voldemort})
@@ -1955,31 +1901,31 @@ class ContactTest(TembaTest):
 
     def test_contact_search_parsing(self):
         # implicit condition on name
-        self.assertEqual(parse_query("will"), ContactQuery(Condition("name", "~", "will")))
-        self.assertEqual(parse_query("1will2"), ContactQuery(Condition("name", "~", "1will2")))
+        self.assertEqual(legacy_parse_query("will"), ContactQuery(Condition("name", "~", "will")))
+        self.assertEqual(legacy_parse_query("1will2"), ContactQuery(Condition("name", "~", "1will2")))
 
-        self.assertEqual(parse_query("will").as_text(), 'name ~ "will"')
-        self.assertEqual(parse_query("1will2").as_text(), 'name ~ "1will2"')
+        self.assertEqual(legacy_parse_query("will").as_text(), 'name ~ "will"')
+        self.assertEqual(legacy_parse_query("1will2").as_text(), 'name ~ "1will2"')
 
         # implicit condition on tel if value is all tel chars
-        self.assertEqual(parse_query("1234"), ContactQuery(Condition("tel", "~", "1234")))
-        self.assertEqual(parse_query("+12-34"), ContactQuery(Condition("tel", "~", "1234")))
-        self.assertEqual(parse_query("1234", as_anon=True), ContactQuery(Condition("id", "=", "1234")))
-        self.assertEqual(parse_query("+12-34", as_anon=True), ContactQuery(Condition("name", "~", "+12-34")))
-        self.assertEqual(parse_query("bob", as_anon=True), ContactQuery(Condition("name", "~", "bob")))
+        self.assertEqual(legacy_parse_query("1234"), ContactQuery(Condition("tel", "~", "1234")))
+        self.assertEqual(legacy_parse_query("+12-34"), ContactQuery(Condition("tel", "~", "1234")))
+        self.assertEqual(legacy_parse_query("1234", as_anon=True), ContactQuery(Condition("id", "=", "1234")))
+        self.assertEqual(legacy_parse_query("+12-34", as_anon=True), ContactQuery(Condition("name", "~", "+12-34")))
+        self.assertEqual(legacy_parse_query("bob", as_anon=True), ContactQuery(Condition("name", "~", "bob")))
 
-        self.assertEqual(parse_query("1234").as_text(), "tel ~ 1234")
-        self.assertEqual(parse_query("+12-34").as_text(), "tel ~ 1234")
+        self.assertEqual(legacy_parse_query("1234").as_text(), "tel ~ 1234")
+        self.assertEqual(legacy_parse_query("+12-34").as_text(), "tel ~ 1234")
 
         # boolean combinations of implicit conditions
         self.assertEqual(
-            parse_query("will felix", optimize=False),
+            legacy_parse_query("will felix", optimize=False),
             ContactQuery(
                 BoolCombination(BoolCombination.AND, Condition("name", "~", "will"), Condition("name", "~", "felix"))
             ),
         )
         self.assertEqual(
-            parse_query("will felix"),
+            legacy_parse_query("will felix"),
             ContactQuery(
                 SinglePropCombination(
                     "name", BoolCombination.AND, Condition("name", "~", "will"), Condition("name", "~", "felix")
@@ -1987,13 +1933,13 @@ class ContactTest(TembaTest):
             ),
         )
         self.assertEqual(
-            parse_query("will and felix", optimize=False),
+            legacy_parse_query("will and felix", optimize=False),
             ContactQuery(
                 BoolCombination(BoolCombination.AND, Condition("name", "~", "will"), Condition("name", "~", "felix"))
             ),
         )
         self.assertEqual(
-            parse_query("will or felix or matt", optimize=False),
+            legacy_parse_query("will or felix or matt", optimize=False),
             ContactQuery(
                 BoolCombination(
                     BoolCombination.OR,
@@ -2006,23 +1952,23 @@ class ContactTest(TembaTest):
         )
 
         # property conditions
-        self.assertEqual(parse_query("name=will"), ContactQuery(Condition("name", "=", "will")))
-        self.assertEqual(parse_query('name ~ "felix"'), ContactQuery(Condition("name", "~", "felix")))
-        self.assertEqual(parse_query('name != "felix"'), ContactQuery(Condition("name", "!=", "felix")))
+        self.assertEqual(legacy_parse_query("name=will"), ContactQuery(Condition("name", "=", "will")))
+        self.assertEqual(legacy_parse_query('name ~ "felix"'), ContactQuery(Condition("name", "~", "felix")))
+        self.assertEqual(legacy_parse_query('name != "felix"'), ContactQuery(Condition("name", "!=", "felix")))
 
         # empty string conditions
-        self.assertEqual(parse_query('name is ""'), ContactQuery(IsSetCondition("name", "is")))
-        self.assertEqual(parse_query('name!=""'), ContactQuery(IsSetCondition("name", "!=")))
+        self.assertEqual(legacy_parse_query('name is ""'), ContactQuery(IsSetCondition("name", "is")))
+        self.assertEqual(legacy_parse_query('name!=""'), ContactQuery(IsSetCondition("name", "!=")))
 
         # boolean combinations of property conditions
         self.assertEqual(
-            parse_query('name=will or name ~ "felix"', optimize=False),
+            legacy_parse_query('name=will or name ~ "felix"', optimize=False),
             ContactQuery(
                 BoolCombination(BoolCombination.OR, Condition("name", "=", "will"), Condition("name", "~", "felix"))
             ),
         )
         self.assertEqual(
-            parse_query('name=will or name ~ "felix"'),
+            legacy_parse_query('name=will or name ~ "felix"'),
             ContactQuery(
                 SinglePropCombination(
                     "name", BoolCombination.OR, Condition("name", "=", "will"), Condition("name", "~", "felix")
@@ -2032,7 +1978,7 @@ class ContactTest(TembaTest):
 
         # mixture of simple and property conditions
         self.assertEqual(
-            parse_query('will or name ~ "felix"'),
+            legacy_parse_query('will or name ~ "felix"'),
             ContactQuery(
                 SinglePropCombination(
                     "name", BoolCombination.OR, Condition("name", "~", "will"), Condition("name", "~", "felix")
@@ -2042,7 +1988,7 @@ class ContactTest(TembaTest):
 
         # optimization will merge conditions combined with the same op
         self.assertEqual(
-            parse_query("will or felix or matt"),
+            legacy_parse_query("will or felix or matt"),
             ContactQuery(
                 SinglePropCombination(
                     "name",
@@ -2056,7 +2002,7 @@ class ContactTest(TembaTest):
 
         # but not conditions combined with different ops
         self.assertEqual(
-            parse_query("will or felix and matt"),
+            legacy_parse_query("will or felix and matt"),
             ContactQuery(
                 BoolCombination(
                     BoolCombination.OR,
@@ -2070,7 +2016,7 @@ class ContactTest(TembaTest):
 
         # optimization respects explicit precedence defined with parentheses
         self.assertEqual(
-            parse_query("(will or felix) and matt"),
+            legacy_parse_query("(will or felix) and matt"),
             ContactQuery(
                 BoolCombination(
                     BoolCombination.AND,
@@ -2083,7 +2029,7 @@ class ContactTest(TembaTest):
         )
 
         # implicit ANDing of conditions
-        query = parse_query('will felix name ~ "matt"')
+        query = legacy_parse_query('will felix name ~ "matt"')
         self.assertEqual(
             query,
             ContactQuery(
@@ -2099,7 +2045,7 @@ class ContactTest(TembaTest):
         self.assertEqual(query.as_text(), 'name ~ "will" AND name ~ "felix" AND name ~ "matt"')
 
         self.assertEqual(
-            parse_query('will felix name ~ "matt"', optimize=False),
+            legacy_parse_query('will felix name ~ "matt"', optimize=False),
             ContactQuery(
                 BoolCombination(
                     BoolCombination.AND,
@@ -2113,7 +2059,7 @@ class ContactTest(TembaTest):
 
         # boolean operator precedence is AND before OR, even when AND is implicit
         self.assertEqual(
-            parse_query("will and felix or matt amber", optimize=False),
+            legacy_parse_query("will and felix or matt amber", optimize=False),
             ContactQuery(
                 BoolCombination(
                     BoolCombination.OR,
@@ -2128,7 +2074,7 @@ class ContactTest(TembaTest):
         )
 
         # boolean combinations can themselves be combined
-        query = parse_query('(Age < 18 and Gender = "male") or (Age > 18 and Gender = "female")')
+        query = legacy_parse_query('(Age < 18 and Gender = "male") or (Age > 18 and Gender = "female")')
         self.assertEqual(
             query,
             ContactQuery(
@@ -2145,987 +2091,55 @@ class ContactTest(TembaTest):
         )
         self.assertEqual(query.as_text(), '(age < 18 AND gender = "male") OR (age > 18 AND gender = "female")')
 
-        self.assertEqual(str(parse_query('Age < 18 and Gender = "male"')), "AND(age<18, gender=male)")
-        self.assertEqual(str(parse_query("Age > 18 and Age < 30")), "AND[age](>18, <30)")
+        self.assertEqual(str(legacy_parse_query('Age < 18 and Gender = "male"')), "AND(age<18, gender=male)")
+        self.assertEqual(str(legacy_parse_query("Age > 18 and Age < 30")), "AND[age](>18, <30)")
 
         # query with UTF-8 characters (non-ascii)
-        query = parse_query('district="Kayônza"')
+        query = legacy_parse_query('district="Kayônza"')
         self.assertEqual(query.as_text(), 'district = "Kayônza"')
 
         # query that has @ sign
-        query = parse_query('email ~ "user@example.com"')
+        query = legacy_parse_query('email ~ "user@example.com"')
         self.assertEqual(query.as_text(), 'email ~ "user@example.com"')
 
-        query = parse_query("email ~ user@example.com")
+        query = legacy_parse_query("email ~ user@example.com")
         self.assertEqual(query.as_text(), 'email ~ "user@example.com"')
 
         # escaped quotes
-        query = parse_query(r'name ~ "O\"Learly"')
+        query = legacy_parse_query(r'name ~ "O\"Learly"')
         self.assertEqual(query.as_text(), r'name ~ "O"Learly"')
-
-    def test_contact_elastic_search(self):
-        gender = ContactField.get_or_create(self.org, self.admin, "gender", "Gender", value_type=Value.TYPE_TEXT)
-        age = ContactField.get_or_create(self.org, self.admin, "age", "Age", value_type=Value.TYPE_NUMBER)
-        joined = ContactField.get_or_create(
-            self.org, self.admin, "joined", "Joined On", value_type=Value.TYPE_DATETIME
-        )
-        ward = ContactField.get_or_create(self.org, self.admin, "ward", "Ward", value_type=Value.TYPE_WARD)
-        district = ContactField.get_or_create(
-            self.org, self.admin, "district", "District", value_type=Value.TYPE_DISTRICT
-        )
-        state = ContactField.get_or_create(self.org, self.admin, "state", "State", value_type=Value.TYPE_STATE)
-
-        base_search = {
-            "query": {
-                "bool": {
-                    "filter": [
-                        # {'term': {'is_blocked': False}},
-                        # {'term': {'is_stopped': False}},
-                        {"term": {"org_id": self.org.id}},
-                        {"term": {"groups": str(self.org.cached_all_contacts_group.uuid)}},
-                    ],
-                    "must": [],
-                }
-            },
-            "sort": [{"id": {"order": "desc"}}],
-        }
-
-        # text term matches
-        expected_search = copy.deepcopy(base_search)
-        expected_search["query"]["bool"]["must"] = [
-            {
-                "nested": {
-                    "path": "fields",
-                    "query": {
-                        "bool": {
-                            "must": [
-                                {"term": {"fields.field": str(gender.uuid)}},
-                                {"term": {"fields.text": "unknown"}},
-                            ]
-                        }
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, 'gender = "unknown"')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        # text term does not match
-        expected_search = copy.deepcopy(base_search)
-        del expected_search["query"]["bool"]["must"]
-        expected_search["query"]["bool"]["must_not"] = [
-            {
-                "nested": {
-                    "path": "fields",
-                    "query": {
-                        "bool": {
-                            "must": [
-                                {"term": {"fields.field": str(gender.uuid)}},
-                                {"term": {"fields.text": "unknown"}},
-                                {"exists": {"field": "fields.text"}},
-                            ]
-                        }
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, 'gender != "unknown"')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        # decimal range matches
-        expected_search = copy.deepcopy(base_search)
-        expected_search["query"]["bool"]["must"] = [
-            {
-                "nested": {
-                    "path": "fields",
-                    "query": {
-                        "bool": {
-                            "must": [{"term": {"fields.field": str(age.uuid)}}, {"match": {"fields.number": "35"}}]
-                        }
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, "age = 35")
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = copy.deepcopy(base_search)
-        expected_search["query"]["bool"]["must"] = [
-            {
-                "nested": {
-                    "path": "fields",
-                    "query": {
-                        "bool": {
-                            "must": [
-                                {"term": {"fields.field": str(age.uuid)}},
-                                {"range": {"fields.number": {"gt": "35"}}},
-                            ]
-                        }
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, "age > 35")
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = copy.deepcopy(base_search)
-        expected_search["query"]["bool"]["must"] = [
-            {
-                "nested": {
-                    "path": "fields",
-                    "query": {
-                        "bool": {
-                            "must": [
-                                {"term": {"fields.field": str(age.uuid)}},
-                                {"range": {"fields.number": {"gte": "35"}}},
-                            ]
-                        }
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, "age >= 35")
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = copy.deepcopy(base_search)
-        expected_search["query"]["bool"]["must"] = [
-            {
-                "nested": {
-                    "path": "fields",
-                    "query": {
-                        "bool": {
-                            "must": [
-                                {"term": {"fields.field": str(age.uuid)}},
-                                {"range": {"fields.number": {"lt": "35"}}},
-                            ]
-                        }
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, "age < 35")
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = copy.deepcopy(base_search)
-        expected_search["query"]["bool"]["must"] = [
-            {
-                "nested": {
-                    "path": "fields",
-                    "query": {
-                        "bool": {
-                            "must": [
-                                {"term": {"fields.field": str(age.uuid)}},
-                                {"range": {"fields.number": {"lte": "35"}}},
-                            ]
-                        }
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, "age <= 35")
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        # datetime range matches
-        expected_search = copy.deepcopy(base_search)
-        expected_search["query"]["bool"]["must"] = [
-            {
-                "nested": {
-                    "path": "fields",
-                    "query": {
-                        "bool": {
-                            "must": [
-                                {"term": {"fields.field": str(joined.uuid)}},
-                                {
-                                    "range": {
-                                        "fields.datetime": {
-                                            "gte": "2018-02-28T22:00:00+00:00",
-                                            "lt": "2018-03-01T22:00:00+00:00",
-                                        }
-                                    }
-                                },
-                            ]
-                        }
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, 'joined = "01-03-2018"')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = copy.deepcopy(base_search)
-        expected_search["query"]["bool"]["must"] = [
-            {
-                "nested": {
-                    "path": "fields",
-                    "query": {
-                        "bool": {
-                            "must": [
-                                {"term": {"fields.field": str(joined.uuid)}},
-                                {"range": {"fields.datetime": {"gte": "2018-03-01T22:00:00+00:00"}}},
-                            ]
-                        }
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, 'joined > "01-03-2018"')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = copy.deepcopy(base_search)
-        expected_search["query"]["bool"]["must"] = [
-            {
-                "nested": {
-                    "path": "fields",
-                    "query": {
-                        "bool": {
-                            "must": [
-                                {"term": {"fields.field": str(joined.uuid)}},
-                                {"range": {"fields.datetime": {"gte": "2018-02-28T22:00:00+00:00"}}},
-                            ]
-                        }
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, 'joined >= "01-03-2018"')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = copy.deepcopy(base_search)
-        expected_search["query"]["bool"]["must"] = [
-            {
-                "nested": {
-                    "path": "fields",
-                    "query": {
-                        "bool": {
-                            "must": [
-                                {"term": {"fields.field": str(joined.uuid)}},
-                                {"range": {"fields.datetime": {"lt": "2018-02-28T22:00:00+00:00"}}},
-                            ]
-                        }
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, 'joined < "01-03-2018"')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = copy.deepcopy(base_search)
-        expected_search["query"]["bool"]["must"] = [
-            {
-                "nested": {
-                    "path": "fields",
-                    "query": {
-                        "bool": {
-                            "must": [
-                                {"term": {"fields.field": str(joined.uuid)}},
-                                {"range": {"fields.datetime": {"lt": "2018-03-01T22:00:00+00:00"}}},
-                            ]
-                        }
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, 'joined <= "01-03-2018"')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        # ward matches
-        expected_search = copy.deepcopy(base_search)
-        expected_search["query"]["bool"]["must"] = [
-            {
-                "nested": {
-                    "path": "fields",
-                    "query": {
-                        "bool": {
-                            "must": [
-                                {"term": {"fields.field": str(ward.uuid)}},
-                                {"term": {"fields.ward_keyword": "bukure"}},
-                            ]
-                        }
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, 'ward = "Bukure"')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        # ward does not match
-        expected_search = copy.deepcopy(base_search)
-        del expected_search["query"]["bool"]["must"]
-        expected_search["query"]["bool"]["must_not"] = [
-            {
-                "nested": {
-                    "path": "fields",
-                    "query": {
-                        "bool": {
-                            "must": [
-                                {"term": {"fields.field": str(ward.uuid)}},
-                                {"term": {"fields.ward_keyword": "bukure"}},
-                                {"exists": {"field": "fields.ward_keyword"}},
-                            ]
-                        }
-                    },
-                }
-            }
-        ]
-
-        actual_search, _ = contact_es_search(self.org, 'ward != "Bukure"')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        self.assertRaises(SearchException, contact_es_search, self.org, 'ward ~ "Bukure"')
-
-        # district matches
-        expected_search = copy.deepcopy(base_search)
-        expected_search["query"]["bool"]["must"] = [
-            {
-                "nested": {
-                    "path": "fields",
-                    "query": {
-                        "bool": {
-                            "must": [
-                                {"term": {"fields.field": str(district.uuid)}},
-                                {"term": {"fields.district_keyword": "rwamagana"}},
-                            ]
-                        }
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, 'district = "Rwamagana"')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        # district does not match
-        expected_search = copy.deepcopy(base_search)
-        del expected_search["query"]["bool"]["must"]
-        expected_search["query"]["bool"]["must_not"] = [
-            {
-                "nested": {
-                    "path": "fields",
-                    "query": {
-                        "bool": {
-                            "must": [
-                                {"term": {"fields.field": str(district.uuid)}},
-                                {"term": {"fields.district_keyword": "rwamagana"}},
-                                {"exists": {"field": "fields.district_keyword"}},
-                            ]
-                        }
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, 'district != "Rwamagana"')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        self.assertRaises(SearchException, contact_es_search, self.org, 'district ~ "Rwamagana"')
-
-        # state matches
-        expected_search = copy.deepcopy(base_search)
-        expected_search["query"]["bool"]["must"] = [
-            {
-                "nested": {
-                    "path": "fields",
-                    "query": {
-                        "bool": {
-                            "must": [
-                                {"term": {"fields.field": str(state.uuid)}},
-                                {"term": {"fields.state_keyword": "eastern province"}},
-                            ]
-                        }
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, 'state = "Eastern Province"')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        # state does not match
-        expected_search = copy.deepcopy(base_search)
-        del expected_search["query"]["bool"]["must"]
-        expected_search["query"]["bool"]["must_not"] = [
-            {
-                "nested": {
-                    "path": "fields",
-                    "query": {
-                        "bool": {
-                            "must": [
-                                {"term": {"fields.field": str(state.uuid)}},
-                                {"term": {"fields.state_keyword": "eastern province"}},
-                                {"exists": {"field": "fields.state_keyword"}},
-                            ]
-                        }
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, 'state != "Eastern Province"')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        self.assertRaises(SearchException, contact_es_search, self.org, 'state ~ "Eastern Province"')
-
-        expected_search = copy.deepcopy(base_search)
-        expected_search["query"]["bool"]["must"] = [
-            {
-                "nested": {
-                    "path": "fields",
-                    "query": {
-                        "bool": {
-                            "must": [
-                                {"term": {"fields.field": str(gender.uuid)}},
-                                {"term": {"fields.text": "unknown"}},
-                            ]
-                        }
-                    },
-                }
-            },
-            {
-                "nested": {
-                    "path": "fields",
-                    "query": {
-                        "bool": {
-                            "must": [
-                                {"term": {"fields.field": str(age.uuid)}},
-                                {"range": {"fields.number": {"gt": "32"}}},
-                            ]
-                        }
-                    },
-                }
-            },
-        ]
-        actual_search, _ = contact_es_search(self.org, 'gender = "unknown" AND age > 32')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = {
-            "query": {
-                "bool": {
-                    "should": [
-                        {
-                            "nested": {
-                                "path": "fields",
-                                "query": {
-                                    "bool": {
-                                        "must": [
-                                            {"term": {"fields.field": str(gender.uuid)}},
-                                            {"term": {"fields.text": "unknown"}},
-                                        ]
-                                    }
-                                },
-                            }
-                        },
-                        {
-                            "nested": {
-                                "path": "fields",
-                                "query": {
-                                    "bool": {
-                                        "must": [
-                                            {"term": {"fields.field": str(joined.uuid)}},
-                                            {"range": {"fields.datetime": {"lt": "2018-02-28T22:00:00+00:00"}}},
-                                        ]
-                                    }
-                                },
-                            }
-                        },
-                    ],
-                    "filter": [
-                        # {'term': {'is_blocked': False}},
-                        # {'term': {'is_stopped': False}},
-                        {"term": {"org_id": self.org.id}},
-                        {"term": {"groups": str(self.org.cached_all_contacts_group.uuid)}},
-                    ],
-                    "minimum_should_match": 1,
-                }
-            },
-            "sort": [{"id": {"order": "desc"}}],
-        }
-
-        actual_search, _ = contact_es_search(self.org, 'gender = "unknown" OR joined < "01-03-2018"')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = copy.deepcopy(base_search)
-        expected_search["query"]["bool"]["must"] = [{"term": {"name.keyword": "joe blow"}}]
-
-        actual_search, _ = contact_es_search(self.org, 'name = "joe Blow"')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = copy.deepcopy(base_search)
-        del expected_search["query"]["bool"]["must"]
-        expected_search["query"]["bool"]["must_not"] = [{"term": {"name.keyword": "joe blow"}}]
-
-        actual_search, _ = contact_es_search(self.org, 'name != "joe Blow"')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        # test `language` contact attribute
-        expected_search = copy.deepcopy(base_search)
-        expected_search["query"]["bool"]["must"] = [{"term": {"language": "eng"}}]
-        actual_search, _ = contact_es_search(self.org, 'language = "eng"')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = copy.deepcopy(base_search)
-        del expected_search["query"]["bool"]["must"]
-        expected_search["query"]["bool"]["must_not"] = [{"term": {"language": "eng"}}]
-
-        actual_search, _ = contact_es_search(self.org, 'language != "eng"')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        # operator not supported
-        self.assertRaises(SearchException, contact_es_search, self.org, 'language ~ "eng"')
-
-        expected_search = {
-            "query": {
-                "bool": {
-                    "must_not": [{"term": {"language": ""}}],
-                    "must": [{"exists": {"field": "language"}}],
-                    "filter": [
-                        # {'term': {'is_blocked': False}},
-                        # {'term': {'is_stopped': False}},
-                        {"term": {"org_id": self.org.id}},
-                        {"term": {"groups": str(self.org.cached_all_contacts_group.uuid)}},
-                    ],
-                }
-            },
-            "sort": [{"id": {"order": "desc"}}],
-        }
-        actual_search, _ = contact_es_search(self.org, 'language != ""')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = {
-            "query": {
-                "bool": {
-                    "should": [
-                        {"bool": {"must_not": [{"exists": {"field": "language"}}]}},
-                        {"term": {"language": ""}},
-                    ],
-                    "filter": [
-                        # {'term': {'is_blocked': False}},
-                        # {'term': {'is_stopped': False}},
-                        {"term": {"org_id": self.org.id}},
-                        {"term": {"groups": str(self.org.cached_all_contacts_group.uuid)}},
-                    ],
-                    "minimum_should_match": 1,
-                }
-            },
-            "sort": [{"id": {"order": "desc"}}],
-        }
-        actual_search, _ = contact_es_search(self.org, 'language = ""')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        # created_on
-        self.assertRaises(SearchException, contact_es_search, self.org, 'created_on != ""')
-        self.assertRaises(SearchException, contact_es_search, self.org, 'created_on = ""')
-        self.assertRaises(SearchException, contact_es_search, self.org, 'created_on ~ "05-07-2018"')
-        self.assertRaises(SearchException, contact_es_search, self.org, 'created_on ~ "this-is-not-a-date"')
-
-        expected_search = copy.deepcopy(base_search)
-        expected_search["query"]["bool"]["must"] = [
-            {"range": {"created_on": {"gte": "2018-07-04T22:00:00+00:00", "lt": "2018-07-05T22:00:00+00:00"}}}
-        ]
-        actual_search, _ = contact_es_search(self.org, 'created_on = "05-07-2018"')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = copy.deepcopy(base_search)
-        expected_search["query"]["bool"]["must"] = [{"range": {"created_on": {"gte": "2018-07-05T22:00:00+00:00"}}}]
-        actual_search, _ = contact_es_search(self.org, 'created_on > "05-07-2018"')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = copy.deepcopy(base_search)
-        expected_search["query"]["bool"]["must"] = [{"range": {"created_on": {"gte": "2018-07-04T22:00:00+00:00"}}}]
-        actual_search, _ = contact_es_search(self.org, 'created_on >= "05-07-2018"')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = copy.deepcopy(base_search)
-        expected_search["query"]["bool"]["must"] = [{"range": {"created_on": {"lt": "2018-07-04T22:00:00+00:00"}}}]
-        actual_search, _ = contact_es_search(self.org, 'created_on < "05-07-2018"')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = copy.deepcopy(base_search)
-        expected_search["query"]["bool"]["must"] = [{"range": {"created_on": {"lt": "2018-07-05T22:00:00+00:00"}}}]
-        actual_search, _ = contact_es_search(self.org, 'created_on <= "05-07-2018"')
-
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = copy.deepcopy(base_search)
-        expected_search["query"]["bool"]["must"] = [
-            {
-                "nested": {
-                    "path": "urns",
-                    "query": {
-                        "bool": {
-                            "must": [
-                                {"term": {"urns.scheme": "tel"}},
-                                {"term": {"urns.path.keyword": "+250788382011"}},
-                            ]
-                        }
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, 'tel = "+250788382011"')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = copy.deepcopy(base_search)
-        expected_search["query"]["bool"]["must"] = [
-            {
-                "nested": {
-                    "path": "urns",
-                    "query": {
-                        "bool": {
-                            "must": [{"term": {"urns.scheme": "twitter"}}, {"match_phrase": {"urns.path": "blow"}}]
-                        }
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, 'twitter ~ "Blow"')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = copy.deepcopy(base_search)
-        expected_search["query"]["bool"]["must"] = [
-            {
-                "nested": {
-                    "path": "urns",
-                    "query": {
-                        "bool": {"must": [{"exists": {"field": "urns.path"}}, {"term": {"urns.scheme": "telegram"}}]}
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, 'telegram != ""')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        # is set not set
-        expected_search = copy.deepcopy(base_search)
-        del expected_search["query"]["bool"]["must"]
-        expected_search["query"]["bool"]["must_not"] = [
-            {
-                "nested": {
-                    "path": "fields",
-                    "query": {
-                        "bool": {
-                            "must": [
-                                {"term": {"fields.field": str(gender.uuid)}},
-                                {"exists": {"field": "fields.text"}},
-                            ]
-                        }
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, 'gender = ""')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = copy.deepcopy(base_search)
-        expected_search["query"]["bool"]["must"] = [
-            {
-                "nested": {
-                    "path": "fields",
-                    "query": {
-                        "bool": {
-                            "must": [
-                                {"term": {"fields.field": str(gender.uuid)}},
-                                {"exists": {"field": "fields.text"}},
-                            ]
-                        }
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, 'gender != ""')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = copy.deepcopy(base_search)
-        del expected_search["query"]["bool"]["must"]
-        expected_search["query"]["bool"]["must_not"] = [
-            {
-                "nested": {
-                    "path": "fields",
-                    "query": {
-                        "bool": {
-                            "must": [{"term": {"fields.field": str(age.uuid)}}, {"exists": {"field": "fields.number"}}]
-                        }
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, 'age = ""')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = copy.deepcopy(base_search)
-        expected_search["query"]["bool"]["must"] = [
-            {
-                "nested": {
-                    "path": "fields",
-                    "query": {
-                        "bool": {
-                            "must": [{"term": {"fields.field": str(age.uuid)}}, {"exists": {"field": "fields.number"}}]
-                        }
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, 'age != ""')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = copy.deepcopy(base_search)
-        del expected_search["query"]["bool"]["must"]
-        expected_search["query"]["bool"]["must_not"] = [
-            {
-                "nested": {
-                    "path": "fields",
-                    "query": {
-                        "bool": {
-                            "must": [
-                                {"term": {"fields.field": str(joined.uuid)}},
-                                {"exists": {"field": "fields.datetime"}},
-                            ]
-                        }
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, 'joined = ""')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = copy.deepcopy(base_search)
-        expected_search["query"]["bool"]["must"] = [
-            {
-                "nested": {
-                    "path": "fields",
-                    "query": {
-                        "bool": {
-                            "must": [
-                                {"term": {"fields.field": str(joined.uuid)}},
-                                {"exists": {"field": "fields.datetime"}},
-                            ]
-                        }
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, 'joined != ""')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = copy.deepcopy(base_search)
-        del expected_search["query"]["bool"]["must"]
-        expected_search["query"]["bool"]["must_not"] = [
-            {
-                "nested": {
-                    "path": "fields",
-                    "query": {
-                        "bool": {
-                            "must": [{"term": {"fields.field": str(ward.uuid)}}, {"exists": {"field": "fields.ward"}}]
-                        }
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, 'ward = ""')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = copy.deepcopy(base_search)
-        expected_search["query"]["bool"]["must"] = [
-            {
-                "nested": {
-                    "path": "fields",
-                    "query": {
-                        "bool": {
-                            "must": [{"term": {"fields.field": str(ward.uuid)}}, {"exists": {"field": "fields.ward"}}]
-                        }
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, 'ward != ""')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = copy.deepcopy(base_search)
-        del expected_search["query"]["bool"]["must"]
-        expected_search["query"]["bool"]["must_not"] = [
-            {
-                "nested": {
-                    "path": "fields",
-                    "query": {
-                        "bool": {
-                            "must": [
-                                {"term": {"fields.field": str(district.uuid)}},
-                                {"exists": {"field": "fields.district"}},
-                            ]
-                        }
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, 'district = ""')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = copy.deepcopy(base_search)
-        expected_search["query"]["bool"]["must"] = [
-            {
-                "nested": {
-                    "path": "fields",
-                    "query": {
-                        "bool": {
-                            "must": [
-                                {"term": {"fields.field": str(district.uuid)}},
-                                {"exists": {"field": "fields.district"}},
-                            ]
-                        }
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, 'district != ""')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = copy.deepcopy(base_search)
-        del expected_search["query"]["bool"]["must"]
-        expected_search["query"]["bool"]["must_not"] = [
-            {
-                "nested": {
-                    "path": "fields",
-                    "query": {
-                        "bool": {
-                            "must": [
-                                {"term": {"fields.field": str(state.uuid)}},
-                                {"exists": {"field": "fields.state"}},
-                            ]
-                        }
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, 'state = ""')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = copy.deepcopy(base_search)
-        expected_search["query"]["bool"]["must"] = [
-            {
-                "nested": {
-                    "path": "fields",
-                    "query": {
-                        "bool": {
-                            "must": [
-                                {"term": {"fields.field": str(state.uuid)}},
-                                {"exists": {"field": "fields.state"}},
-                            ]
-                        }
-                    },
-                }
-            }
-        ]
-        acutal_search, _ = contact_es_search(self.org, 'state != ""')
-        self.assertEqual(acutal_search.to_dict(), expected_search)
-
-        expected_search = copy.deepcopy(base_search)
-        expected_search["query"]["bool"]["must"] = [
-            {
-                "nested": {
-                    "path": "urns",
-                    "query": {
-                        "bool": {"must": [{"exists": {"field": "urns.path"}}, {"term": {"urns.scheme": "tel"}}]}
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, 'tel != ""')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = copy.deepcopy(base_search)
-        del expected_search["query"]["bool"]["must"]
-        expected_search["query"]["bool"]["must_not"] = [
-            {
-                "nested": {
-                    "path": "urns",
-                    "query": {
-                        "bool": {"must": [{"exists": {"field": "urns.path"}}, {"term": {"urns.scheme": "twitter"}}]}
-                    },
-                }
-            }
-        ]
-        actual_search, _ = contact_es_search(self.org, 'twitter = ""')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = {
-            "query": {
-                "bool": {
-                    "should": [
-                        {"bool": {"must_not": [{"exists": {"field": "name"}}]}},
-                        {"term": {"name.keyword": ""}},
-                    ],
-                    "filter": [
-                        # {'term': {'is_blocked': False}},
-                        # {'term': {'is_stopped': False}},
-                        {"term": {"org_id": self.org.id}},
-                        {"term": {"groups": str(self.org.cached_all_contacts_group.uuid)}},
-                    ],
-                    "minimum_should_match": 1,
-                }
-            },
-            "sort": [{"id": {"order": "desc"}}],
-        }
-        actual_search, _ = contact_es_search(self.org, 'name = ""')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        expected_search = {
-            "query": {
-                "bool": {
-                    "must_not": [{"term": {"name.keyword": ""}}],
-                    "must": [{"exists": {"field": "name"}}],
-                    "filter": [
-                        # {'term': {'is_blocked': False}},
-                        # {'term': {'is_stopped': False}},
-                        {"term": {"org_id": self.org.id}},
-                        {"term": {"groups": str(self.org.cached_all_contacts_group.uuid)}},
-                    ],
-                }
-            },
-            "sort": [{"id": {"order": "desc"}}],
-        }
-        actual_search, _ = contact_es_search(self.org, 'name != ""')
-        self.assertEqual(actual_search.to_dict(), expected_search)
-
-        with AnonymousOrg(self.org):
-            expected_search = copy.deepcopy(base_search)
-            expected_search["query"]["bool"]["must"] = [{"ids": {"values": ["123"]}}]
-            actual_search, _ = contact_es_search(self.org, "123")
-            self.assertEqual(actual_search.to_dict(), expected_search)
-
-            expected_search = copy.deepcopy(base_search)
-            expected_search["query"]["bool"]["must"] = [{"ids": {"values": [-1]}}]
-            actual_search, _ = contact_es_search(self.org, 'twitter ~ "Blow"')
-            self.assertEqual(actual_search.to_dict(), expected_search)
-
-            expected_search = copy.deepcopy(base_search)
-            expected_search["query"]["bool"]["must"] = [{"ids": {"values": [-1]}}]
-            actual_search, _ = contact_es_search(self.org, 'twitter != ""')
-            self.assertEqual(actual_search.to_dict(), expected_search)
-
-            expected_search = copy.deepcopy(base_search)
-            expected_search["query"]["bool"]["must"] = [{"ids": {"values": [-1]}}]
-            actual_search, _ = contact_es_search(self.org, 'twitter = ""')
-            self.assertEqual(actual_search.to_dict(), expected_search)
-
-            self.assertRaises(SearchException, contact_es_search, self.org, 'id = ""')
 
     def test_contact_create_with_dynamicgroup_reevaluation(self):
 
         ContactField.get_or_create(self.org, self.admin, "age", label="Age", value_type=Value.TYPE_NUMBER)
         ContactField.get_or_create(self.org, self.admin, "gender", label="Gender", value_type=Value.TYPE_TEXT)
 
-        with ESMockWithScroll():
+        with MockParseQuery('(age < 18 AND gender = "male") or (age > 18 and gender = "female")', ["age", "gender"]):
             ContactGroup.create_dynamic(
                 self.org,
                 self.admin,
                 "simple group",
                 '(Age < 18 and gender = "male") or (Age > 18 and gender = "female")',
             )
+
+        with MockParseQuery('age > 18 AND gender = "male"', ["age", "gender"]):
             ContactGroup.create_dynamic(self.org, self.admin, "cannon fodder", 'age > 18 and gender = "male"')
+
+        with MockParseQuery('age = ""', ["age"]):
             ContactGroup.create_dynamic(self.org, self.admin, "Empty age field", 'age = ""')
+
+        with MockParseQuery('age != ""', ["age"]):
             ContactGroup.create_dynamic(self.org, self.admin, "Age field is set", 'age != ""')
+
+        with MockParseQuery('twitter = "helio"', ["twitter"]):
             ContactGroup.create_dynamic(self.org, self.admin, "urn group", 'twitter = "helio"')
 
-            with self.assertRaises(ValueError):
+        with self.assertRaises(ValueError):
+            with MockParseQuery(error="age field is invalid"):
                 ContactGroup.create_dynamic(self.org, self.admin, "Age field is invalid", 'age < "age"')
 
         # when creating a new contact we should only reevaluate 'empty age field' and 'urn group' groups
-        with self.assertNumQueries(30):
+        with self.assertNumQueries(32):
             contact = Contact.get_or_create_by_urns(self.org, self.admin, name="Željko", urns=["twitter:helio"])
 
         self.assertCountEqual(
@@ -3147,8 +2161,10 @@ class ContactTest(TembaTest):
         self.create_field("gender", "Gender")
         joe_and_frank = self.create_group("Joe and Frank", [self.joe, self.frank])
         nobody = self.create_group("Nobody", [])
-        with ESMockWithScroll():
+
+        with MockParseQuery('gender = "M"', ["gender"]):
             men = self.create_group("Men", query="gender=M")
+            ContactGroup.user_groups.filter(id=men.id).update(status=ContactGroup.STATUS_READY)
 
             # a group which is being re-evaluated and shouldn't appear in any omnibox results
             unready = self.create_group("Group being re-evaluated...", query="gender=M")
@@ -3176,55 +2192,23 @@ class ContactTest(TembaTest):
             return response.json()["results"]
 
         # search with search string that will raise a SearchException, which we ignore
-        with ESMockWithScrollMultiple(data=[[], []]):
-
+        with patch("temba.contacts.omnibox.search_contacts") as sc:
+            sc.side_effect = SearchException("Invalid query")
             actual_result = omnibox_request("search=-123`213")
             expected_result = []
 
             self.assertEqual(actual_result, expected_result)
 
-        mock_es_data_contact = [
-            {
-                "_type": "_doc",
-                "_index": "dummy_index",
-                "_source": {"id": self.billy.id, "modified_on": self.billy.modified_on.isoformat()},
-            },
-            {
-                "_type": "_doc",
-                "_index": "dummy_index",
-                "_source": {"id": self.frank.id, "modified_on": self.frank.modified_on.isoformat()},
-            },
-            {
-                "_type": "_doc",
-                "_index": "dummy_index",
-                "_source": {"id": self.joe.id, "modified_on": self.joe.modified_on.isoformat()},
-            },
-            {
-                "_type": "_doc",
-                "_index": "dummy_index",
-                "_source": {"id": self.voldemort.id, "modified_on": self.voldemort.modified_on.isoformat()},
-            },
-        ]
-        mock_es_data_urn = [
-            {
-                "_type": "_doc",
-                "_index": "dummy_index",
-                "_source": {"id": self.frank.id, "modified_on": self.frank.modified_on.isoformat()},
-            },
-            {
-                "_type": "_doc",
-                "_index": "dummy_index",
-                "_source": {"id": self.joe.id, "modified_on": self.joe.modified_on.isoformat()},
-            },
-            {
-                "_type": "_doc",
-                "_index": "dummy_index",
-                "_source": {"id": self.voldemort.id, "modified_on": self.voldemort.modified_on.isoformat()},
-            },
-        ]
-
-        # omnibox v2 format
-        with ESMockWithScrollMultiple(data=[mock_es_data_contact, mock_es_data_urn]):
+        with patch("temba.contacts.omnibox.search_contacts") as sc:
+            sc.side_effect = [
+                SearchResults(
+                    query="",
+                    total=4,
+                    fields=[""],
+                    contact_ids=[self.billy.id, self.frank.id, self.joe.id, self.voldemort.id],
+                ),
+                SearchResults(query="", total=3, fields=[""], contact_ids=[]),
+            ]
             actual_result = omnibox_request(query="", version="2")
             expected_result = [
                 # all 3 groups A-Z
@@ -3236,15 +2220,22 @@ class ContactTest(TembaTest):
                 {"id": self.frank.uuid, "name": "Frank Smith", "type": "contact", "urn": "250782222222"},
                 {"id": self.joe.uuid, "name": "Joe Blow", "type": "contact", "urn": "blow80"},
                 {"id": self.voldemort.uuid, "name": "250768383383", "type": "contact", "urn": "250768383383"},
-                # 3 sendable URNs with contact names
-                {"id": "tel:250768383383", "name": "250768383383", "type": "urn", "contact": None, "scheme": "tel"},
-                {
-                    "id": "tel:250781111111",
-                    "name": "250781111111",
-                    "type": "urn",
-                    "contact": "Joe Blow",
-                    "scheme": "tel",
-                },
+            ]
+
+            self.assertEqual(expected_result, actual_result)
+
+        with patch("temba.contacts.omnibox.search_contacts") as sc:
+            sc.side_effect = [
+                SearchResults(query="", total=2, fields=[""], contact_ids=[self.billy.id, self.frank.id]),
+                SearchResults(query="", total=2, fields=[""], contact_ids=[self.voldemort.id, self.frank.id]),
+            ]
+            actual_result = omnibox_request(query="search=250", version="2")
+            expected_result = [
+                # 2 contacts
+                {"id": self.billy.uuid, "name": "Billy Nophone", "type": "contact", "urn": ""},
+                {"id": self.frank.uuid, "name": "Frank Smith", "type": "contact", "urn": "250782222222"},
+                # 2 sendable URNs with contact names
+                {"id": "tel:250768383383", "name": "250768383383", "contact": None, "scheme": "tel", "type": "urn"},
                 {
                     "id": "tel:250782222222",
                     "name": "250782222222",
@@ -3252,29 +2243,24 @@ class ContactTest(TembaTest):
                     "contact": "Frank Smith",
                     "scheme": "tel",
                 },
-                {"id": "twitter:blow80", "name": "blow80", "type": "urn", "contact": "Joe Blow", "scheme": "twitter"},
             ]
-
             self.assertEqual(expected_result, actual_result)
 
-        with ESMockWithScrollMultiple(data=[mock_es_data_contact, mock_es_data_urn]):
-            with self.assertNumQueries(20):
-                actual_result = omnibox_request("")
+        with patch("temba.contacts.omnibox.search_contacts") as sc:
+            sc.side_effect = [
+                SearchResults(query="", total=2, fields=[""], contact_ids=[self.billy.id, self.frank.id]),
+                SearchResults(query="", total=0, fields=[""], contact_ids=[]),
+            ]
+            with self.assertNumQueries(17):
+                actual_result = omnibox_request(query="")
                 expected_result = [
                     # all 3 groups A-Z
                     dict(id="g-%s" % joe_and_frank.uuid, text="Joe and Frank", extra=2),
                     dict(id="g-%s" % men.uuid, text="Men", extra=0),
                     dict(id="g-%s" % nobody.uuid, text="Nobody", extra=0),
-                    # all 4 contacts A-Z
+                    # 2 contacts A-Z
                     dict(id="c-%s" % self.billy.uuid, text="Billy Nophone", extra=""),
                     dict(id="c-%s" % self.frank.uuid, text="Frank Smith", extra="250782222222"),
-                    dict(id="c-%s" % self.joe.uuid, text="Joe Blow", extra="blow80"),
-                    dict(id="c-%s" % self.voldemort.uuid, text="250768383383", extra="250768383383"),
-                    # 3 sendable URNs with names as extra
-                    dict(id="u-%d" % voldemort_tel.pk, text="250768383383", extra=None, scheme="tel"),
-                    dict(id="u-%d" % joe_tel.pk, text="250781111111", extra="Joe Blow", scheme="tel"),
-                    dict(id="u-%d" % frank_tel.pk, text="250782222222", extra="Frank Smith", scheme="tel"),
-                    dict(id="u-%d" % joe_twitter.pk, text="blow80", extra="Joe Blow", scheme="twitter"),
                 ]
 
             self.assertEqual(expected_result, actual_result)
@@ -3300,32 +2286,20 @@ class ContactTest(TembaTest):
             ],
         )
 
-        # c,u = contacts and URNs
-        mock_es_data = [
-            {
-                "_type": "_doc",
-                "_index": "dummy_index",
-                "_source": {"id": self.billy.id, "modified_on": self.billy.modified_on.isoformat()},
-            },
-            {
-                "_type": "_doc",
-                "_index": "dummy_index",
-                "_source": {"id": self.frank.id, "modified_on": self.frank.modified_on.isoformat()},
-            },
-            {
-                "_type": "_doc",
-                "_index": "dummy_index",
-                "_source": {"id": self.joe.id, "modified_on": self.joe.modified_on.isoformat()},
-            },
-            {
-                "_type": "_doc",
-                "_index": "dummy_index",
-                "_source": {"id": self.voldemort.id, "modified_on": self.voldemort.modified_on.isoformat()},
-            },
-        ]
-        with ESMockWithScroll(data=mock_es_data):
+        with patch("temba.contacts.omnibox.search_contacts") as sc:
+            sc.side_effect = [
+                SearchResults(
+                    query="",
+                    total=4,
+                    fields=[""],
+                    contact_ids=[self.billy.id, self.frank.id, self.joe.id, self.voldemort.id],
+                ),
+                SearchResults(
+                    query="", total=3, fields=[""], contact_ids=[self.voldemort.id, self.joe.id, self.frank.id]
+                ),
+            ]
             self.assertEqual(
-                omnibox_request("types=c,u"),
+                omnibox_request("search=250&types=c,u"),
                 [
                     dict(id="c-%s" % self.billy.uuid, text="Billy Nophone", extra=""),
                     dict(id="c-%s" % self.frank.uuid, text="Frank Smith", extra="250782222222"),
@@ -3334,27 +2308,19 @@ class ContactTest(TembaTest):
                     dict(id="u-%d" % voldemort_tel.pk, text="250768383383", extra=None, scheme="tel"),
                     dict(id="u-%d" % joe_tel.pk, text="250781111111", extra="Joe Blow", scheme="tel"),
                     dict(id="u-%d" % frank_tel.pk, text="250782222222", extra="Frank Smith", scheme="tel"),
-                    dict(id="u-%d" % joe_twitter.pk, text="blow80", extra="Joe Blow", scheme="twitter"),
                 ],
             )
 
         # search for Frank by phone
-        mock_es_data = [
-            {
-                "_type": "_doc",
-                "_index": "dummy_index",
-                "_source": {"id": self.frank.id, "modified_on": self.frank.modified_on.isoformat()},
-            }
-        ]
-        with ESMockWithScrollMultiple(data=[[], mock_es_data]):
+        with patch("temba.contacts.omnibox.search_contacts") as sc:
+            sc.side_effect = [
+                SearchResults(query="name ~ 222", total=0, fields=[""], contact_ids=[]),
+                SearchResults(query="urn ~ 222", total=1, fields=[""], contact_ids=[self.frank.id]),
+            ]
             self.assertEqual(
                 omnibox_request("search=222"),
                 [dict(id="u-%d" % frank_tel.pk, text="250782222222", extra="Frank Smith", scheme="tel")],
             )
-
-        # search for Joe by twitter - won't return anything because there is no twitter channel
-        with ESMockWithScrollMultiple(data=[[], []]):
-            self.assertEqual(omnibox_request("search=blow80"), [])
 
         # create twitter channel
         Channel.create(self.org, self.user, None, "TT")
@@ -3362,39 +2328,12 @@ class ContactTest(TembaTest):
         # add add an external channel so numbers get normalized
         Channel.create(self.org, self.user, "RW", "EX", schemes=[TEL_SCHEME])
 
-        # search for again for Joe by twitter
-        mock_es_data = [
-            {
-                "_type": "_doc",
-                "_index": "dummy_index",
-                "_source": {"id": self.joe.id, "modified_on": self.joe.modified_on.isoformat()},
-            }
-        ]
-        with ESMockWithScrollMultiple(data=[[], mock_es_data]):
-            self.assertEqual(
-                omnibox_request("search=blow80"),
-                [
-                    dict(id="u-%d" % joe_tel.pk, text="0781 111 111", extra="Joe Blow", scheme="tel"),
-                    dict(id="u-%d" % joe_twitter.pk, text="blow80", extra="Joe Blow", scheme="twitter"),
-                ],
-            )
-
-        # search for Joe again - match on last name and twitter handle
-        mock_es_data_contact = [
-            {
-                "_type": "_doc",
-                "_index": "dummy_index",
-                "_source": {"id": self.joe.id, "modified_on": self.joe.modified_on.isoformat()},
-            }
-        ]
-        mock_es_data_urn = [
-            {
-                "_type": "_doc",
-                "_index": "dummy_index",
-                "_source": {"id": self.joe.id, "modified_on": self.joe.modified_on.isoformat()},
-            }
-        ]
-        with ESMockWithScrollMultiple(data=[mock_es_data_contact, mock_es_data_urn]):
+        # search for Joe - match on last name and twitter handle
+        with patch("temba.contacts.omnibox.search_contacts") as sc:
+            sc.side_effect = [
+                SearchResults(query="name ~ blow", total=1, fields=[""], contact_ids=[self.joe.id]),
+                SearchResults(query="urn ~ blow", total=1, fields=[""], contact_ids=[self.joe.id]),
+            ]
             self.assertEqual(
                 omnibox_request("search=BLOW"),
                 [
@@ -3403,34 +2342,6 @@ class ContactTest(TembaTest):
                     dict(id="u-%d" % joe_twitter.pk, text="blow80", extra="Joe Blow", scheme="twitter"),
                 ],
             )
-
-        # make sure our matches are ANDed
-        mock_es_data = [
-            {
-                "_type": "_doc",
-                "_index": "dummy_index",
-                "_source": {"id": self.joe.id, "modified_on": self.joe.modified_on.isoformat()},
-            }
-        ]
-        with ESMockWithScrollMultiple(data=[mock_es_data, []]):
-            self.assertEqual(
-                omnibox_request("search=Joe+o&types=c"),
-                [dict(id="c-%s" % self.joe.uuid, text="Joe Blow", extra="blow80")],
-            )
-
-        self.assertEqual(
-            omnibox_request("search=Joe+o&types=g"),
-            [dict(id="g-%s" % joe_and_frank.uuid, text="Joe and Frank", extra=2)],
-        )
-
-        # lookup by contact ids
-        self.assertEqual(
-            omnibox_request("c=%s,%s" % (self.joe.uuid, self.frank.uuid)),
-            [
-                dict(id="c-%s" % self.frank.uuid, text="Frank Smith", extra="0782 222 222"),
-                dict(id="c-%s" % self.joe.uuid, text="Joe Blow", extra="blow80"),
-            ],
-        )
 
         # lookup by group id
         self.assertEqual(
@@ -3464,30 +2375,8 @@ class ContactTest(TembaTest):
         )
 
         with AnonymousOrg(self.org):
-            mock_es_data = [
-                {
-                    "_type": "_doc",
-                    "_index": "dummy_index",
-                    "_source": {"id": self.billy.id, "modified_on": self.billy.modified_on.isoformat()},
-                },
-                {
-                    "_type": "_doc",
-                    "_index": "dummy_index",
-                    "_source": {"id": self.frank.id, "modified_on": self.frank.modified_on.isoformat()},
-                },
-                {
-                    "_type": "_doc",
-                    "_index": "dummy_index",
-                    "_source": {"id": self.joe.id, "modified_on": self.joe.modified_on.isoformat()},
-                },
-                {
-                    "_type": "_doc",
-                    "_index": "dummy_index",
-                    "_source": {"id": self.voldemort.id, "modified_on": self.voldemort.modified_on.isoformat()},
-                },
-            ]
-
-            with ESMockWithScrollMultiple(data=[mock_es_data, []]):
+            with patch("temba.contacts.omnibox.search_contacts") as sc:
+                sc.side_effect = [SearchResults(query="", total=1, fields=[""], contact_ids=[self.billy.id])]
                 self.assertEqual(
                     omnibox_request(""),
                     [
@@ -3495,16 +2384,15 @@ class ContactTest(TembaTest):
                         dict(id="g-%s" % joe_and_frank.uuid, text="Joe and Frank", extra=2),
                         dict(id="g-%s" % men.uuid, text="Men", extra=0),
                         dict(id="g-%s" % nobody.uuid, text="Nobody", extra=0),
-                        # all 4 contacts A-Z
+                        # 1 contact
                         dict(id="c-%s" % self.billy.uuid, text="Billy Nophone"),
-                        dict(id="c-%s" % self.frank.uuid, text="Frank Smith"),
-                        dict(id="c-%s" % self.joe.uuid, text="Joe Blow"),
-                        dict(id="c-%s" % self.voldemort.uuid, text=self.voldemort.anon_identifier),
+                        # no urns
                     ],
                 )
 
             # same search but with v2 format
-            with ESMockWithScrollMultiple(data=[mock_es_data, []]):
+            with patch("temba.contacts.omnibox.search_contacts") as sc:
+                sc.side_effect = [SearchResults(query="", total=1, fields=[""], contact_ids=[self.billy.id])]
                 self.assertEqual(
                     omnibox_request("", version="2"),
                     [
@@ -3512,31 +2400,10 @@ class ContactTest(TembaTest):
                         {"id": joe_and_frank.uuid, "name": "Joe and Frank", "type": "group", "count": 2},
                         {"id": men.uuid, "name": "Men", "type": "group", "count": 0},
                         {"id": nobody.uuid, "name": "Nobody", "type": "group", "count": 0},
-                        # all 4 contacts A-Z
+                        # 1 contact
                         {"id": self.billy.uuid, "name": "Billy Nophone", "type": "contact"},
-                        {"id": self.frank.uuid, "name": "Frank Smith", "type": "contact"},
-                        {"id": self.joe.uuid, "name": "Joe Blow", "type": "contact"},
-                        {"id": self.voldemort.uuid, "name": self.voldemort.anon_identifier, "type": "contact"},
                     ],
                 )
-
-            # can search by frank id
-            mock_es_data = [
-                {
-                    "_type": "_doc",
-                    "_index": "dummy_index",
-                    "_source": {"id": self.frank.id, "modified_on": self.frank.modified_on.isoformat()},
-                }
-            ]
-            with ESMockWithScrollMultiple(data=[mock_es_data, []]):
-                self.assertEqual(
-                    omnibox_request("search=%d" % self.frank.pk),
-                    [dict(id="c-%s" % self.frank.uuid, text="Frank Smith")],
-                )
-
-            # but not by frank number
-            with ESMockWithScrollMultiple(data=[[], []]):
-                self.assertEqual(omnibox_request("search=222"), [])
 
         # exclude blocked and stopped contacts
         self.joe.block(self.admin)
@@ -4112,12 +2979,12 @@ class ContactTest(TembaTest):
                 message=msg,
             )
 
+        with MockParseQuery('planting_date != ""', ["planting_date"]):
+            planters = self.create_group("Planters", query='planting_date != ""')
+
         now = timezone.now()
         self.joe.set_field(self.user, "planting_date", (now + timedelta(days=1)).isoformat())
         EventFire.update_campaign_events(self.campaign)
-
-        with ESMockWithScroll():
-            planters = self.create_group("Planters", query='planting_date != ""')
 
         # should have seven fires, one for each campaign event
         self.assertEqual(7, EventFire.objects.filter(event__is_active=True).count())
@@ -4739,7 +3606,7 @@ class ContactTest(TembaTest):
 
         # try to push into a dynamic group
         self.login(self.admin)
-        with ESMockWithScroll():
+        with MockParseQuery("tel = 325423", ["tel"]):
             group = self.create_group("Dynamo", query="tel = 325423")
 
         with self.assertRaises(ValueError):
@@ -4820,8 +3687,9 @@ class ContactTest(TembaTest):
 
         self.client.post(reverse("orgs.org_languages"), dict(primary_lang="eng", languages="fra"))
 
-        with ESMockWithScroll():
+        with MockParseQuery('language = "eng"', ["language"]):
             language_group = self.create_group("English humans", query="language is eng")
+            ContactGroup.user_groups.filter(id=language_group.id).update(status=ContactGroup.STATUS_READY)
 
         self.assertEqual(language_group.contacts.count(), 0)
 
@@ -4844,8 +3712,9 @@ class ContactTest(TembaTest):
     def test_contact_name_update(self):
         self.login(self.admin)
 
-        with ESMockWithScroll():
+        with MockParseQuery('name ~ "Dave"', ["name"]):
             dave_group = self.create_group("All Daves of the world", query="name has Dave")
+            ContactGroup.user_groups.filter(id=dave_group.id).update(status=ContactGroup.STATUS_READY)
 
         self.assertEqual(dave_group.contacts.count(), 0)
 
@@ -6089,7 +4958,7 @@ class ContactTest(TembaTest):
         self.create_campaign()
 
         self.create_field("team", "Team")
-        with ESMockWithScroll():
+        with MockParseQuery('team = "ballers"', ["team"]):
             ballers = self.create_group("Ballers", query="team = ballers")
 
         self.campaign.group = ballers
@@ -6633,29 +5502,10 @@ class ContactTest(TembaTest):
             joined_field = ContactField.get_or_create(self.org, self.admin, "joined", "Join Date", value_type="D")
 
             # create groups based on name or URN (checks that contacts are added correctly on contact create)
-            mock_es_data = [
-                {
-                    "_type": "_doc",
-                    "_index": "dummy_index",
-                    "_source": {"id": self.joe.id, "modified_on": self.joe.modified_on.isoformat()},
-                }
-            ]
-            with ESMockWithScroll(data=mock_es_data):
+            with MockParseQuery('twitter = "blow80"', ["twitter"]):
                 joes_group = self.create_group("People called Joe", query='twitter = "blow80"')
 
-            mock_es_data = [
-                {
-                    "_type": "_doc",
-                    "_index": "dummy_index",
-                    "_source": {"id": self.joe.id, "modified_on": self.joe.modified_on.isoformat()},
-                },
-                {
-                    "_type": "_doc",
-                    "_index": "dummy_index",
-                    "_source": {"id": self.frank.id, "modified_on": self.frank.modified_on.isoformat()},
-                },
-            ]
-            with ESMockWithScroll(data=mock_es_data):
+            with MockParseQuery('tel ~ "078"', ["tel"]):
                 mtn_group = self.create_group("People with number containing '078'", query='tel has "078"')
 
             self.mary = self.create_contact("Mary", "+250783333333")
@@ -6673,31 +5523,14 @@ class ContactTest(TembaTest):
             self.frank.set_field(self.user, "age", "50")
             self.frank.set_field(self.user, "joined", "1/1/2014")
 
-            # create more groups based on fields (checks that contacts are added correctly on group create)
-            mock_es_data = [
-                {
-                    "_type": "_doc",
-                    "_index": "dummy_index",
-                    "_source": {"id": self.joe.id, "modified_on": self.joe.modified_on.isoformat()},
-                },
-                {
-                    "_type": "_doc",
-                    "_index": "dummy_index",
-                    "_source": {"id": self.frank.id, "modified_on": self.frank.modified_on.isoformat()},
-                },
-            ]
-            with ESMockWithScroll(data=mock_es_data):
+            with MockParseQuery('gender = "male" AND age >= 18', ["gender", "age"]):
                 men_group = self.create_group("Boys", query='gender = "male" AND age >= 18')
 
-            mock_es_data = [
-                {
-                    "_type": "_doc",
-                    "_index": "dummy_index",
-                    "_source": {"id": self.mary.id, "modified_on": self.mary.modified_on.isoformat()},
-                }
-            ]
-            with ESMockWithScroll(data=mock_es_data):
+            with MockParseQuery('gender = "female" AND age >= 18', ["gender", "age"]):
                 women_group = self.create_group("Girls", query='gender = "female" AND age >= 18')
+
+            for c in [self.frank, self.joe, self.mary]:
+                c.handle_update(is_new=True)
 
             joe_flow = self.create_flow()
             joes_campaign = Campaign.create(self.org, self.admin, "Joe Reminders", joes_group)
@@ -6964,7 +5797,7 @@ class ContactFieldTest(TembaTest):
         contact2.update_urns(self.admin, urns)
 
         group = self.create_group("Poppin Tags", [contact, contact2])
-        with ESMockWithScroll():
+        with MockParseQuery("tel = 1234", ["tel"]):
             group2 = self.create_group("Dynamic", query="tel is 1234")
         group2.status = ContactGroup.STATUS_EVALUATING
         group2.save()
@@ -7259,135 +6092,138 @@ class ContactFieldTest(TembaTest):
                 log_info_threshold.return_value = 1
 
                 with ESMockWithScroll(data=mock_es_data):
-                    with self.assertNumQueries(48):
-                        self.assertExcelSheet(
-                            request_export("?s=name+has+adam+or+name+has+deng")[0],
-                            [
+                    with MockParseQuery(query='name ~ "adam" OR name ~ "deng"', fields=["name"]):
+                        with self.assertNumQueries(47):
+                            self.assertExcelSheet(
+                                request_export("?s=name+has+adam+or+name+has+deng")[0],
                                 [
-                                    "Contact UUID",
-                                    "Name",
-                                    "Language",
-                                    "Created On",
-                                    "URN:Mailto",
-                                    "URN:Tel",
-                                    "URN:Tel",
-                                    "URN:Telegram",
-                                    "URN:Twitter",
-                                    "Field:Third",
-                                    "Field:Second",
-                                    "Field:First",
+                                    [
+                                        "Contact UUID",
+                                        "Name",
+                                        "Language",
+                                        "Created On",
+                                        "URN:Mailto",
+                                        "URN:Tel",
+                                        "URN:Tel",
+                                        "URN:Telegram",
+                                        "URN:Twitter",
+                                        "Field:Third",
+                                        "Field:Second",
+                                        "Field:First",
+                                    ],
+                                    [
+                                        contact2.uuid,
+                                        "Adam Sumner",
+                                        "eng",
+                                        contact2.created_on,
+                                        "adam@sumner.com",
+                                        "+12067799191",
+                                        "",
+                                        "1234",
+                                        "adam",
+                                        "",
+                                        "",
+                                        "",
+                                    ],
+                                    [
+                                        contact3.uuid,
+                                        "Luol Deng",
+                                        "",
+                                        contact3.created_on,
+                                        "",
+                                        "+12078776655",
+                                        "",
+                                        "",
+                                        "deng",
+                                        "",
+                                        "",
+                                        "",
+                                    ],
                                 ],
-                                [
-                                    contact2.uuid,
-                                    "Adam Sumner",
-                                    "eng",
-                                    contact2.created_on,
-                                    "adam@sumner.com",
-                                    "+12067799191",
-                                    "",
-                                    "1234",
-                                    "adam",
-                                    "",
-                                    "",
-                                    "",
-                                ],
-                                [
-                                    contact3.uuid,
-                                    "Luol Deng",
-                                    "",
-                                    contact3.created_on,
-                                    "",
-                                    "+12078776655",
-                                    "",
-                                    "",
-                                    "deng",
-                                    "",
-                                    "",
-                                    "",
-                                ],
-                            ],
-                            tz=self.org.timezone,
-                        )
+                                tz=self.org.timezone,
+                            )
 
-                    self.assertEqual(len(captured_logger.output), 2)
-                    self.assertTrue("contacts - 50% (1/2)" in captured_logger.output[0])
-                    self.assertTrue("contacts - 100% (2/2)" in captured_logger.output[1])
+                        self.assertEqual(len(captured_logger.output), 2)
+                        self.assertTrue("contacts - 50% (1/2)" in captured_logger.output[0])
+                        self.assertTrue("contacts - 100% (2/2)" in captured_logger.output[1])
 
-                    assertImportExportedFile("?s=name+has+adam+or+name+has+deng")
+                        assertImportExportedFile("?s=name+has+adam+or+name+has+deng")
 
         # export a search within a specified group of contacts
         mock_es_data = [{"_type": "_doc", "_index": "dummy_index", "_source": {"id": contact.id}}]
         with ESMockWithScroll(data=mock_es_data):
-            with self.assertNumQueries(49):
+            with MockParseQuery(query='name ~ "Hagg"', fields=["name"]):
+                with self.assertNumQueries(48):
+                    self.assertExcelSheet(
+                        request_export("?g=%s&s=Hagg" % group.uuid)[0],
+                        [
+                            [
+                                "Contact UUID",
+                                "Name",
+                                "Language",
+                                "Created On",
+                                "URN:Mailto",
+                                "URN:Tel",
+                                "URN:Tel",
+                                "URN:Telegram",
+                                "URN:Twitter",
+                                "Field:Third",
+                                "Field:Second",
+                                "Field:First",
+                            ],
+                            [
+                                contact.uuid,
+                                "Ben Haggerty",
+                                "",
+                                contact.created_on,
+                                "",
+                                "+12067799294",
+                                "+12062233445",
+                                "",
+                                "",
+                                "20-12-2015 08:30",
+                                "",
+                                "One",
+                            ],
+                        ],
+                        tz=self.org.timezone,
+                    )
+
+                assertImportExportedFile("?g=%s&s=Hagg" % group.uuid)
+
+        # now try with an anonymous org
+        with AnonymousOrg(self.org):
+            with MockParseQuery(query='name ~ "Hagg"', fields=["name"]):
                 self.assertExcelSheet(
-                    request_export("?g=%s&s=Hagg" % group.uuid)[0],
+                    request_export()[0],
                     [
                         [
+                            "ID",
                             "Contact UUID",
                             "Name",
                             "Language",
                             "Created On",
-                            "URN:Mailto",
-                            "URN:Tel",
-                            "URN:Tel",
-                            "URN:Telegram",
-                            "URN:Twitter",
                             "Field:Third",
                             "Field:Second",
                             "Field:First",
                         ],
+                        [str(contact2.id), contact2.uuid, "Adam Sumner", "eng", contact2.created_on, "", "", ""],
                         [
+                            str(contact.id),
                             contact.uuid,
                             "Ben Haggerty",
                             "",
                             contact.created_on,
-                            "",
-                            "+12067799294",
-                            "+12062233445",
-                            "",
-                            "",
                             "20-12-2015 08:30",
                             "",
                             "One",
                         ],
+                        [str(contact3.id), contact3.uuid, "Luol Deng", "", contact3.created_on, "", "", ""],
+                        [str(contact4.id), contact4.uuid, "Stephen", "", contact4.created_on, "", "", ""],
                     ],
                     tz=self.org.timezone,
                 )
-
-            assertImportExportedFile("?g=%s&s=Hagg" % group.uuid)
-
-        # now try with an anonymous org
-        with AnonymousOrg(self.org):
-            self.assertExcelSheet(
-                request_export()[0],
-                [
-                    [
-                        "ID",
-                        "Contact UUID",
-                        "Name",
-                        "Language",
-                        "Created On",
-                        "Field:Third",
-                        "Field:Second",
-                        "Field:First",
-                    ],
-                    [str(contact2.id), contact2.uuid, "Adam Sumner", "eng", contact2.created_on, "", "", ""],
-                    [
-                        str(contact.id),
-                        contact.uuid,
-                        "Ben Haggerty",
-                        "",
-                        contact.created_on,
-                        "20-12-2015 08:30",
-                        "",
-                        "One",
-                    ],
-                    [str(contact3.id), contact3.uuid, "Luol Deng", "", contact3.created_on, "", "", ""],
-                    [str(contact4.id), contact4.uuid, "Stephen", "", contact4.created_on, "", "", ""],
-                ],
-                tz=self.org.timezone,
-            )
-            assertImportExportedFile()
+                assertImportExportedFile()
 
     def test_prepare_sort_field_struct(self):
         ward = ContactField.get_or_create(self.org, self.admin, "ward", "Home Ward", value_type=Value.TYPE_WARD)
@@ -8224,3 +7060,287 @@ class PhoneNumberTest(TestCase):
         self.assertEqual(is_phonenumber("AMAZONS"), (False, None))
         self.assertEqual(is_phonenumber('name = "Jack"'), (False, None))
         self.assertEqual(is_phonenumber('(social = "234-432-324")'), (False, None))
+
+
+class ESIntegrationTest(TembaTestMixin, SmartminTestMixin, TransactionTestCase):
+    def test_ES_contacts_index(self):
+        self.create_anonymous_user()
+        self.admin = self.create_user("Administrator")
+        self.user = self.admin
+
+        self.country = AdminBoundary.create(osm_id="171496", name="Rwanda", level=0)
+        self.state1 = AdminBoundary.create(osm_id="1708283", name="Kigali City", level=1, parent=self.country)
+        self.state2 = AdminBoundary.create(osm_id="171591", name="Eastern Province", level=1, parent=self.country)
+        self.district1 = AdminBoundary.create(osm_id="1711131", name="Gatsibo", level=2, parent=self.state2)
+        self.district2 = AdminBoundary.create(osm_id="1711163", name="Kayônza", level=2, parent=self.state2)
+        self.district3 = AdminBoundary.create(osm_id="3963734", name="Nyarugenge", level=2, parent=self.state1)
+        self.district4 = AdminBoundary.create(osm_id="1711142", name="Rwamagana", level=2, parent=self.state2)
+        self.ward1 = AdminBoundary.create(osm_id="171113181", name="Kageyo", level=3, parent=self.district1)
+        self.ward2 = AdminBoundary.create(osm_id="171116381", name="Kabare", level=3, parent=self.district2)
+        self.ward3 = AdminBoundary.create(osm_id="171114281", name="Bukure", level=3, parent=self.district4)
+
+        self.org = Org.objects.create(
+            name="Temba",
+            timezone=pytz.timezone("Africa/Kigali"),
+            country=self.country,
+            brand=settings.DEFAULT_BRAND,
+            created_by=self.admin,
+            modified_by=self.admin,
+        )
+
+        self.org.initialize(topup_size=1000)
+        self.admin.set_org(self.org)
+        self.org.administrators.add(self.admin)
+
+        self.client.login(username=self.admin.username, password=self.admin.username)
+
+        age = ContactField.get_or_create(self.org, self.admin, "age", "Age", value_type="N")
+        ContactField.get_or_create(self.org, self.admin, "join_date", "Join Date", value_type="D")
+        ContactField.get_or_create(self.org, self.admin, "state", "Home State", value_type="S")
+        ContactField.get_or_create(self.org, self.admin, "home", "Home District", value_type="I")
+        ward = ContactField.get_or_create(self.org, self.admin, "ward", "Home Ward", value_type="W")
+        ContactField.get_or_create(self.org, self.admin, "profession", "Profession", value_type="T")
+        ContactField.get_or_create(self.org, self.admin, "isureporter", "Is UReporter", value_type="T")
+        ContactField.get_or_create(self.org, self.admin, "hasbirth", "Has Birth", value_type="T")
+
+        names = ["Trey", "Mike", "Paige", "Fish", "", None]
+        districts = ["Gatsibo", "Kayônza", "Rwamagana", None]
+        wards = ["Kageyo", "Kabara", "Bukure", None]
+        date_format = self.org.get_datetime_formats()[0]
+
+        # reset contact ids so we don't get unexpected collisions with phone numbers
+        with connection.cursor() as cursor:
+            cursor.execute("""SELECT setval(pg_get_serial_sequence('"contacts_contact"','id'), 900)""")
+
+        # create some contacts
+        for i in range(90):
+            name = names[i % len(names)]
+
+            number = "0188382%s" % str(i).zfill(3)
+            twitter = ("tweep_%d" % (i + 1)) if (i % 3 == 0) else None  # 1 in 3 have twitter URN
+            contact = self.create_contact(name=name, number=number, twitter=twitter)
+            join_date = datetime_to_str(date(2014, 1, 1) + timezone.timedelta(days=i), date_format, tz=pytz.utc)
+
+            # some field data so we can do some querying
+            contact.set_field(self.admin, "age", str(i + 10))
+            contact.set_field(self.admin, "join_date", str(join_date))
+            contact.set_field(self.admin, "state", "Eastern Province")
+            contact.set_field(self.admin, "home", districts[i % len(districts)])
+            contact.set_field(self.admin, "ward", wards[i % len(wards)])
+
+            contact.set_field(self.admin, "isureporter", "yes" if i % 2 == 0 else "no" if i % 3 == 0 else None)
+            contact.set_field(self.admin, "hasbirth", "no")
+
+            if i % 3 == 0:
+                contact.set_field(self.admin, "profession", "Farmer")  # only some contacts have any value for this
+
+        def q(query):
+            results = search_contacts(self.org.id, self.org.cached_all_contacts_group.uuid, query, None)
+            return results.total
+
+        db_config = connection.settings_dict
+        database_url = (
+            f"postgres://{db_config['USER']}:{db_config['PASSWORD']}@{db_config['HOST']}:{db_config['PORT']}/"
+            f"{db_config['NAME']}?sslmode=disable"
+        )
+        print(f"Using database: {database_url}")
+
+        result = subprocess.run(
+            ["./rp-indexer", "-elastic-url", settings.ELASTICSEARCH_URL, "-db", database_url, "-rebuild"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(result.returncode, 0, "Command failed: %s\n\n%s" % (result.stdout, result.stderr))
+
+        # give ES some time to publish the results
+        time.sleep(5)
+
+        self.assertEqual(q("trey"), 15)
+        self.assertEqual(q("MIKE"), 15)
+        self.assertEqual(q("  paige  "), 15)
+        self.assertEqual(q("0188382011"), 1)
+        self.assertEqual(q("trey 0188382"), 15)
+
+        # name as property
+        self.assertEqual(q('name is "trey"'), 15)
+        self.assertEqual(q("name is mike"), 15)
+        self.assertEqual(q("name = paige"), 15)
+        self.assertEqual(q('name != ""'), 60)
+        self.assertEqual(q('NAME = ""'), 30)
+        self.assertEqual(q("name ~ Mi"), 15)
+        self.assertEqual(q('name != "Mike"'), 75)
+
+        # URN as property
+        self.assertEqual(q("tel is +250188382011"), 1)
+        self.assertEqual(q("tel has 0188382011"), 1)
+        self.assertEqual(q("twitter = tweep_13"), 1)
+        self.assertEqual(q('twitter = ""'), 60)
+        self.assertEqual(q('twitter != ""'), 30)
+        self.assertEqual(q("TWITTER has tweep"), 30)
+
+        # contact field as property
+        self.assertEqual(q("age > 30"), 69)
+        self.assertEqual(q("age >= 30"), 70)
+        self.assertEqual(q("age > 30 and age <= 40"), 10)
+        self.assertEqual(q("AGE < 20"), 10)
+        self.assertEqual(q('age != ""'), 90)
+        self.assertEqual(q('age = ""'), 0)
+
+        self.assertEqual(q("join_date = 1-1-14"), 1)
+        self.assertEqual(q("join_date < 30/1/2014"), 29)
+        self.assertEqual(q("join_date <= 30/1/2014"), 30)
+        self.assertEqual(q("join_date > 30/1/2014"), 60)
+        self.assertEqual(q("join_date >= 30/1/2014"), 61)
+        self.assertEqual(q('join_date != ""'), 90)
+        self.assertEqual(q('join_date = ""'), 0)
+
+        self.assertEqual(q('state is "Eastern Province"'), 90)
+        self.assertEqual(q("HOME is Kayônza"), 23)
+        self.assertEqual(q("ward is kageyo"), 23)
+        self.assertEqual(q("ward != kageyo"), 67)  # includes objects with empty ward
+
+        self.assertEqual(q('home is ""'), 22)
+        self.assertEqual(q('profession = ""'), 60)
+        self.assertEqual(q('profession is ""'), 60)
+        self.assertEqual(q('profession != ""'), 30)
+
+        # contact fields beginning with 'is' or 'has'
+        self.assertEqual(q('isureporter = "yes"'), 45)
+        self.assertEqual(q("isureporter = yes"), 45)
+        self.assertEqual(q("isureporter = no"), 15)
+        self.assertEqual(q("isureporter != no"), 75)  # includes objects with empty isureporter
+
+        self.assertEqual(q('hasbirth = "no"'), 90)
+        self.assertEqual(q("hasbirth = no"), 90)
+        self.assertEqual(q("hasbirth = yes"), 0)
+
+        # boolean combinations
+        self.assertEqual(q("name is trey or name is mike"), 30)
+        self.assertEqual(q("name is trey and age < 20"), 2)
+        self.assertEqual(q('(home is gatsibo or home is "Rwamagana")'), 45)
+        self.assertEqual(q('(home is gatsibo or home is "Rwamagana") and name is trey'), 15)
+        self.assertEqual(q('name is MIKE and profession = ""'), 15)
+        self.assertEqual(q("profession = doctor or profession = farmer"), 30)  # same field
+        self.assertEqual(q("age = 20 or age = 21"), 2)
+        self.assertEqual(q("join_date = 30/1/2014 or join_date = 31/1/2014"), 2)
+
+        # create contact with no phone number, we'll try searching for it by id
+        contact = self.create_contact(name="Id Contact")
+
+        # a new contact was created, execute the rp-indexer again
+        result = subprocess.run(
+            ["./rp-indexer", "-elastic-url", settings.ELASTICSEARCH_URL, "-db", database_url, "-rebuild"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(result.returncode, 0, "Command failed: %s\n\n%s" % (result.stdout, result.stderr))
+
+        # give ES some time to publish the results
+        time.sleep(5)
+
+        # NOTE: when this fails with `AssertionError: 90 != 0`, check if contact phone numbers might match
+        # NOTE: for example id=2507, tel=250788382011 ... will match
+        # non-anon orgs can't search by id (because they never see ids), but they match on tel
+        self.assertEqual(q("%d" % contact.pk), 0)
+
+        with AnonymousOrg(self.org):
+            # still allow name and field searches
+            self.assertEqual(q("trey"), 15)
+            self.assertEqual(q("name is mike"), 15)
+            self.assertEqual(q("age > 30"), 69)
+
+            # don't allow matching on URNs
+            self.assertEqual(q("0188382011"), 0)
+            self.assertRaises(SearchException, q, "tel is +250188382011")
+            self.assertRaises(SearchException, q, "twitter has tweep")
+            self.assertRaises(SearchException, q, 'twitter = ""')
+
+            # anon orgs can search by id, with or without zero padding
+            self.assertEqual(q("%d" % contact.pk), 1)
+            self.assertEqual(q("%010d" % contact.pk), 1)
+
+        # invalid queries
+        self.assertRaises(SearchException, q, "((")
+        self.assertRaises(SearchException, q, 'name = "trey')  # unterminated string literal
+        self.assertRaises(SearchException, q, "name > trey")  # unrecognized non-field operator   # ValueError
+        self.assertRaises(SearchException, q, "profession > trey")  # unrecognized text-field operator   # ValueError
+        self.assertRaises(SearchException, q, "age has 4")  # unrecognized decimal-field operator   # ValueError
+        self.assertRaises(SearchException, q, "age = x")  # unparseable decimal-field comparison
+        self.assertRaises(
+            SearchException, q, "join_date has 30/1/2014"
+        )  # unrecognized date-field operator   # ValueError
+        self.assertRaises(SearchException, q, "join_date > xxxxx")  # unparseable date-field comparison
+        self.assertRaises(SearchException, q, "home > kigali")  # unrecognized location-field operator
+        self.assertRaises(SearchException, q, "credits > 10")  # non-existent field or attribute
+        self.assertRaises(SearchException, q, "tel < +250188382011")  # unsupported comparator for a URN   # ValueError
+        self.assertRaises(SearchException, q, 'tel < ""')  # unsupported comparator for an empty string
+        self.assertRaises(SearchException, q, "data=“not empty”")  # unicode “,” are not accepted characters
+
+        # test contact_search_list
+        url = reverse("contacts.contact_list")
+        self.login(self.admin)
+
+        response = self.client.get("%s?sort_on=%s" % (url, "created_on"))
+        self.assertEqual(response.context["object_list"][0].name, "Trey")  # first contact in the set
+        self.assertEqual(response.context["object_list"][0].fields[str(age.uuid)], {"text": "10", "number": "10"})
+
+        response = self.client.get("%s?sort_on=-%s" % (url, "created_on"))
+        self.assertEqual(response.context["object_list"][0].name, "Id Contact")  # last contact in the set
+        self.assertEqual(response.context["object_list"][0].fields, None)
+
+        response = self.client.get("%s?sort_on=-%s" % (url, str(ward.key)))
+        self.assertEqual(
+            response.context["object_list"][0].fields[str(ward.uuid)],
+            {
+                "district": "Rwanda > Eastern Province > Gatsibo",
+                "state": "Rwanda > Eastern Province",
+                "text": "Kageyo",
+                "ward": "Rwanda > Eastern Province > Gatsibo > Kageyo",
+            },
+        )
+
+        response = self.client.get("%s?sort_on=%s" % (url, str(ward.key)))
+        self.assertEqual(
+            response.context["object_list"][0].fields[str(ward.uuid)],
+            {
+                "district": "Rwanda > Eastern Province > Rwamagana",
+                "state": "Rwanda > Eastern Province",
+                "text": "Bukure",
+                "ward": "Rwanda > Eastern Province > Rwamagana > Bukure",
+            },
+        )
+
+        # create a dynamic group on age
+        self.login(self.admin)
+        url = reverse("contacts.contactgroup_create")
+        self.client.post(url, dict(name="Adults", group_query="age > 30"))
+
+        time.sleep(5)
+
+        # check that it was created with the right counts
+        adults = ContactGroup.user_groups.get(org=self.org, name="Adults")
+        self.assertEqual(69, adults.get_member_count())
+
+        # create a campaign and event on this group
+        campaign = Campaign.create(self.org, self.admin, "Cake Day", adults)
+        created_on = ContactField.all_fields.get(org=self.org, key="created_on")
+        event = CampaignEvent.create_message_event(
+            self.org, self.admin, campaign, relative_to=created_on, offset=12, unit="M", message="Happy One Year!"
+        )
+        # rapidpro creation of events
+        EventFire.create_eventfires_for_event(event)
+
+        # should have 69 events
+        EventFire.objects.filter(event=event, fired=None).count()
+
+        # update the query
+        url = reverse("contacts.contactgroup_update", args=[adults.id])
+        response = self.client.post(url, dict(name="Adults", query="age > 18"))
+
+        time.sleep(5)
+
+        # should have updated count
+        self.assertEqual(81, adults.get_member_count())
+
+        # should now have 81 events instead, these were created by mailroom
+        self.assertEqual(81, EventFire.objects.filter(event=event, fired=None).count())

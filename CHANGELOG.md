@@ -1,3 +1,60 @@
+v5.3.51
+----------
+ * Update to floweditor 1.7.15
+ * Add python script to do all CI required formatting and locale rebuilding
+ * Use mailroom for query parsing for contact exports
+ * Fix text positioning on list pages
+ * Fix delete contact group modal buttons when blocked by dependencies
+ * Completion with upper case functions
+
+v5.3.50
+----------
+ * Migration to set allow_international=true in configs of existing tel channels
+ * Remove no longer used flow definition caching stuff
+
+v5.3.49
+----------
+ * Use realistic phone numbers in mailroom test db
+ * Remove contact filtering from flow results page
+ * Add migration to populate Flow.template_dependencies
+
+v5.3.48
+----------
+ * Use mailroom searching for omnibox results
+
+v5.3.47
+----------
+ * Add template_dependencies m2m
+
+v5.3.46
+----------
+ * Do not subject requests to the API with sessions to rate limiting
+ * Migration to convert flow dependencies metadata to new format
+ * Update description on the flow results export to be clear
+
+v5.3.45
+----------
+ * Fix deletion of orgs and locations so that aliases are properly deleted
+ * Remove syntax highlighting in API explorer as it can't handle big responses
+ * Use new dependencies format from mailroom
+
+v5.3.44
+----------
+ * Dynamic group creation / reevaluation through Mailroom
+
+v5.3.43
+----------
+ * Update to latest mailroom
+
+v5.3.42
+----------
+ * Fix actions on blocked contact list page
+
+v5.3.41
+----------
+ * Disable simulation for archived flows
+ * Fix query explosion on Android channel alerts
+
 v5.3.40
 ----------
  * Add subflow parameters to editor

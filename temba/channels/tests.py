@@ -25,7 +25,7 @@ from temba.contacts.models import TEL_SCHEME, TWITTER_SCHEME, URN, Contact, Cont
 from temba.ivr.models import IVRCall
 from temba.msgs.models import IVR, PENDING, QUEUED, Broadcast, Msg
 from temba.orgs.models import Org
-from temba.tests import AnonymousOrg, MockResponse, TembaTest
+from temba.tests import AnonymousOrg, MigrationTest, MockResponse, TembaTest
 from temba.triggers.models import Trigger
 from temba.utils import dict_to_struct, get_anonymous_user, json
 from temba.utils.dates import datetime_to_ms, ms_to_datetime
@@ -2212,11 +2212,21 @@ class ChannelClaimTest(TembaTest):
         self.assertFalse(alert.ended_on)
         self.assertTrue(len(mail.outbox) == 2)
 
-        # run again, nothing should change
-        check_channels_task()
+        # create another open SMS alert
+        Alert.objects.create(
+            channel=self.channel,
+            alert_type=Alert.TYPE_SMS,
+            created_on=timezone.now(),
+            created_by=self.admin,
+            modified_on=timezone.now(),
+            modified_by=self.admin,
+        )
 
-        alert = Alert.objects.get(ended_on=None)
-        self.assertFalse(alert.ended_on)
+        # run again, nothing should change
+        with self.assertNumQueries(10):
+            check_channels_task()
+
+        self.assertEqual(2, Alert.objects.filter(channel=self.channel, ended_on=None).count())
         self.assertTrue(len(mail.outbox) == 2)
 
         # fix our message
@@ -3114,3 +3124,20 @@ class CourierTest(TembaTest):
         response = self.client.get(reverse("courier.t", args=[self.channel.uuid, "receive"]))
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.content, b"this URL should be mapped to a Courier instance")
+
+
+class PopulateAllowInternationalTest(MigrationTest):
+    app = "channels"
+    migrate_from = "0121_auto_20191112_1938"
+    migrate_to = "0122_populate_allow_international"
+
+    def setUpBeforeMigration(self, apps):
+        # create a non-tel channel
+        self.channel2 = Channel.create(self.org, self.user, None, "FB", name="Test FB Channel")
+
+    def test_migration(self):
+        self.channel.refresh_from_db()
+        self.channel2.refresh_from_db()
+
+        self.assertEqual({"FCM_ID": "123", "allow_international": True}, self.channel.config)
+        self.assertEqual({}, self.channel2.config)

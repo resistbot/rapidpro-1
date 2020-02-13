@@ -36,15 +36,7 @@ from temba import mailroom
 from temba.archives.models import Archive
 from temba.channels.models import Channel
 from temba.classifiers.models import Classifier
-from temba.contacts.models import (
-    FACEBOOK_SCHEME,
-    TEL_SCHEME,
-    WHATSAPP_SCHEME,
-    Contact,
-    ContactField,
-    ContactGroup,
-    ContactURN,
-)
+from temba.contacts.models import FACEBOOK_SCHEME, TEL_SCHEME, WHATSAPP_SCHEME, ContactField, ContactGroup, ContactURN
 from temba.contacts.omnibox import omnibox_deserialize
 from temba.flows import legacy
 from temba.flows.legacy.expressions import get_function_listing
@@ -1192,9 +1184,11 @@ class FlowCRUDL(SmartCRUDL):
             if flow.is_archived:
                 context["mutable"] = False
                 context["can_start"] = False
+                context["can_simulate"] = False
             else:
                 context["mutable"] = self.has_org_perm("flows.flow_update") and not self.request.user.is_superuser
                 context["can_start"] = flow.flow_type != Flow.TYPE_VOICE or flow.org.supports_ivr()
+                context["can_simulate"] = True
 
             context["dev_mode"] = dev_mode
             context["is_starting"] = flow.is_starting()
@@ -1557,25 +1551,10 @@ class FlowCRUDL(SmartCRUDL):
         def get_context_data(self, *args, **kwargs):
             context = super().get_context_data(*args, **kwargs)
             flow = self.get_object()
-            org = self.derive_org()
-
             runs = flow.runs.all()
 
             if str_to_bool(self.request.GET.get("responded", "true")):
                 runs = runs.filter(responded=True)
-
-            query = self.request.GET.get("q", None)
-            contact_ids = []
-            if query:
-                try:
-                    # search for contact ids based on name or telephone
-                    query = query.strip()
-                    query = f"name ~ {query} OR tel ~ {query}"
-                    contact_ids = Contact.query_elasticsearch_for_ids(org, query)
-                except Exception:  # pragma: no cover
-                    # if we cant parse it, then no matches
-                    pass
-                runs = runs.filter(contact__in=contact_ids)
 
             # paginate
             modified_on = self.request.GET.get("modified_on", None)
@@ -1951,7 +1930,7 @@ class FlowCRUDL(SmartCRUDL):
             whatsapp_channel = org.get_channel_for_role(Channel.ROLE_SEND, scheme=WHATSAPP_SCHEME)
             if whatsapp_channel:
                 # check to see we are using templates
-                templates = flow.metadata.get(Flow.METADATA_DEPENDENCIES, {}).get("templates", [])
+                templates = flow.get_dependencies_metadata("template")
                 if not templates:
                     warnings.append(
                         _(
