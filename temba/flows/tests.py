@@ -94,7 +94,6 @@ class FlowTest(TembaTest):
         flow3 = Flow.create(self.org, self.admin, Flow.get_unique_name(self.org, "Sheep Poll"), base_language="base")
         self.assertEqual(flow3.name, "Sheep Poll 3")
 
-        self.setUpSecondaryOrg()
         self.assertEqual(Flow.get_unique_name(self.org2, "Sheep Poll"), "Sheep Poll")  # different org
 
     @patch("temba.mailroom.queue_interrupt")
@@ -217,6 +216,13 @@ class FlowTest(TembaTest):
         self.assertContains(response, "Start Notifications")
         self.assertContains(response, "Stop Notifications")
         self.assertContains(response, "Appointment Followup")
+
+        # check we can't see farmers
+        farmers = ContactGroup.create_static(self.org2, self.admin, "Farmers")
+        campaign2 = Campaign.create(self.org2, self.admin, Campaign.get_unique_name(self.org, "Reminders"), farmers)
+
+        response = self.client.get(reverse("flows.flow_campaign", args=[campaign2.id]))
+        self.assertLoginRedirect(response)
 
     def test_facebook_warnings(self):
         no_topic = self.get_flow("pick_a_number")
@@ -1445,7 +1451,8 @@ class FlowTest(TembaTest):
         str(FlowCategoryCount.objects.all().first())
 
         # and if we delete our runs, things zero out
-        self.releaseRuns()
+        for run in FlowRun.objects.all():
+            run.release()
 
         counts = favorites.get_category_counts()
         assertCount(counts, "beer", "Turbo King", 0)
@@ -1828,8 +1835,6 @@ class FlowTest(TembaTest):
         self.viewer = self.create_user("Viewer")
         self.org.viewers.add(self.viewer)
         self.viewer.set_org(self.org)
-
-        self.setUpSecondaryOrg()
 
         # create a flow for another org and a flow label
         flow2 = Flow.create(self.org2, self.admin2, "Flow2")
@@ -2428,8 +2433,6 @@ class FlowCRUDLTest(TembaTest):
     def test_views(self):
         contact = self.create_contact("Eric", "+250788382382")
         flow = self.get_flow("color", legacy=True)
-
-        self.setUpSecondaryOrg()
 
         # create a flow for another org
         other_flow = Flow.create(self.org2, self.admin2, "Flow2", base_language="base")
@@ -3170,6 +3173,7 @@ class FlowCRUDLTest(TembaTest):
     @patch("temba.flows.views.uuid4")
     def test_upload_media_action(self, mock_uuid):
         flow = self.get_flow("color_v13")
+        other_org_flow = self.create_flow(org=self.org2)
 
         upload_media_action_url = reverse("flows.flow_upload_media_action", args=[flow.uuid])
 
@@ -3186,23 +3190,29 @@ class FlowCRUDLTest(TembaTest):
 
         self.login(self.admin)
 
-        mock_uuid.side_effect = ["11111-111-11", "22222-222-22", "33333-333-33"]
+        mock_uuid.side_effect = ["11111-111-11", "22222-222-22", "33333-333-33", "44444-444-44"]
 
         assert_media_upload(
-            "%s/test_media/steve.marten.jpg" % settings.MEDIA_ROOT,
+            f"{settings.MEDIA_ROOT}/test_media/steve.marten.jpg",
             "image/jpeg",
             "%s/attachments/%d/%d/steps/%s%s" % (settings.STORAGE_URL, self.org.id, flow.id, "11111-111-11", ".jpg"),
         )
         assert_media_upload(
-            "%s/test_media/snow.mp4" % settings.MEDIA_ROOT,
+            f"{settings.MEDIA_ROOT}/test_media/snow.mp4",
             "video/mp4",
             "%s/attachments/%d/%d/steps/%s%s" % (settings.STORAGE_URL, self.org.id, flow.id, "22222-222-22", ".mp4"),
         )
         assert_media_upload(
-            "%s/test_media/snow.m4a" % settings.MEDIA_ROOT,
+            f"{settings.MEDIA_ROOT}/test_media/snow.m4a",
             "audio/mp4",
             "%s/attachments/%d/%d/steps/%s%s" % (settings.STORAGE_URL, self.org.id, flow.id, "33333-333-33", ".m4a"),
         )
+
+        # can't upload for flow in other org
+        with open(f"{settings.MEDIA_ROOT}/test_media/steve.marten.jpg", "rb") as data:
+            upload_url = reverse("flows.flow_upload_media_action", args=[other_org_flow.uuid])
+            response = self.client.post(upload_url, {"file": data, "action": "", "HTTP_X_FORWARDED_HTTPS": "https"})
+            self.assertLoginRedirect(response)
 
     def test_recent_messages(self):
         contact = self.create_contact("Bob", number="+593979099111")
@@ -3892,7 +3902,7 @@ class FlowRunTest(TembaTest):
         self.assertIsNone(run_json["exited_on"])
         self.assertIsNone(run_json["submitted_by"])
 
-    def _check_deletion(self, delete_reason, expected):
+    def _check_deletion(self, delete_reason, expected, session_completed=True):
         """
         Runs our favorites flow, then releases the run with the passed in delete_reason, asserting our final state
         """
@@ -3908,29 +3918,51 @@ class FlowRunTest(TembaTest):
         end_prompt = flow_nodes[8]
 
         start = FlowStart.create(flow, self.admin, contacts=[self.contact])
-        (
-            MockSessionWriter(self.contact, flow, start)
-            .visit(color_prompt)
-            .send_msg("What is your favorite color?", self.channel)
-            .visit(color_split)
-            .wait()
-            .resume(msg=self.create_incoming_msg(self.contact, "blue"))
-            .set_result("Color", "blue", "Blue", "blue")
-            .visit(beer_prompt, exit_index=2)
-            .send_msg("Good choice, I like Blue too! What is your favorite beer?")
-            .visit(beer_split)
-            .wait()
-            .resume(msg=self.create_incoming_msg(self.contact, "primus"))
-            .set_result("Beer", "primus", "Primus", "primus")
-            .visit(name_prompt, exit_index=2)
-            .send_msg("Mmmmm... delicious Turbo King. Lastly, what is your name?")
-            .visit(name_split)
-            .wait()
-            .resume(msg=self.create_incoming_msg(self.contact, "Ryan Lewis"))
-            .visit(end_prompt)
-            .complete()
-            .save()
-        )
+        if session_completed:
+            (
+                MockSessionWriter(self.contact, flow, start)
+                .visit(color_prompt)
+                .send_msg("What is your favorite color?", self.channel)
+                .visit(color_split)
+                .wait()
+                .resume(msg=self.create_incoming_msg(self.contact, "blue"))
+                .set_result("Color", "blue", "Blue", "blue")
+                .visit(beer_prompt, exit_index=2)
+                .send_msg("Good choice, I like Blue too! What is your favorite beer?")
+                .visit(beer_split)
+                .wait()
+                .resume(msg=self.create_incoming_msg(self.contact, "primus"))
+                .set_result("Beer", "primus", "Primus", "primus")
+                .visit(name_prompt, exit_index=2)
+                .send_msg("Mmmmm... delicious Turbo King. Lastly, what is your name?")
+                .visit(name_split)
+                .wait()
+                .resume(msg=self.create_incoming_msg(self.contact, "Ryan Lewis"))
+                .visit(end_prompt)
+                .complete()
+                .save()
+            )
+        else:
+            (
+                MockSessionWriter(self.contact, flow, start)
+                .visit(color_prompt)
+                .send_msg("What is your favorite color?", self.channel)
+                .visit(color_split)
+                .wait()
+                .resume(msg=self.create_incoming_msg(self.contact, "blue"))
+                .set_result("Color", "blue", "Blue", "blue")
+                .visit(beer_prompt, exit_index=2)
+                .send_msg("Good choice, I like Blue too! What is your favorite beer?")
+                .visit(beer_split)
+                .wait()
+                .resume(msg=self.create_incoming_msg(self.contact, "primus"))
+                .set_result("Beer", "primus", "Primus", "primus")
+                .visit(name_prompt, exit_index=2)
+                .send_msg("Mmmmm... delicious Turbo King. Lastly, what is your name?")
+                .visit(name_split)
+                .wait()
+                .save()
+            )
 
         run = FlowRun.objects.get(contact=self.contact)
         run.release(delete_reason)
@@ -3950,20 +3982,35 @@ class FlowRunTest(TembaTest):
 
         self.assertFalse(FlowRun.objects.filter(id=run.id).exists())
 
-    def test_deletion(self):
+    @patch("temba.mailroom.queue_interrupt")
+    def test_deletion(self, mock_queue_interrupt):
         self._check_deletion(
             None, {"red_count": 0, "primus_count": 0, "start_count": 0, "run_count": {"C": 0, "E": 0, "I": 0, "A": 0}}
         )
+        self.assertFalse(mock_queue_interrupt.called)
 
-    def test_user_deletion(self):
+    @patch("temba.mailroom.queue_interrupt")
+    def test_user_deletion_with_complete_session(self, mock_queue_interrupt):
         self._check_deletion(
             "U", {"red_count": 0, "primus_count": 0, "start_count": 0, "run_count": {"C": 0, "E": 0, "I": 0, "A": 0}}
         )
+        self.assertFalse(mock_queue_interrupt.called)
 
-    def test_archiving(self):
+    @patch("temba.mailroom.queue_interrupt")
+    def test_user_deletion_without_complete_session(self, mock_queue_interrupt):
+        self._check_deletion(
+            "U",
+            {"red_count": 0, "primus_count": 0, "start_count": 0, "run_count": {"C": 0, "E": 0, "I": 0, "A": 0}},
+            False,
+        )
+        mock_queue_interrupt.assert_called_once()
+
+    @patch("temba.mailroom.queue_interrupt")
+    def test_archiving(self, mock_queue_interrupt):
         self._check_deletion(
             "A", {"red_count": 1, "primus_count": 1, "start_count": 1, "run_count": {"C": 1, "E": 0, "I": 0, "A": 0}}
         )
+        self.assertFalse(mock_queue_interrupt.called)
 
 
 class FlowSessionTest(TembaTest):
@@ -4177,7 +4224,7 @@ class ExportFlowResultsTest(TembaTest):
                 # make sure that we trigger logger
                 log_info_threshold.return_value = 1
 
-                with self.assertNumQueries(42):
+                with self.assertNumQueries(43):
                     workbook = self._export(flow, group_memberships=[devs])
 
                 self.assertEqual(len(captured_logger.output), 3)
@@ -4483,7 +4530,7 @@ class ExportFlowResultsTest(TembaTest):
         self.contact.set_field(self.admin, "age", "36")
 
         tz = self.org.timezone
-        sheet_runs, = workbook.worksheets
+        (sheet_runs,) = workbook.worksheets
 
         # check runs sheet...
         self.assertEqual(4, len(list(sheet_runs.rows)))  # header + 3 runs
@@ -5600,7 +5647,7 @@ class FlowLabelTest(TembaTest):
         favorites = self.get_flow("favorites")
         label.toggle_label([favorites], True)
         response = self.client.get(reverse("flows.flow_filter", args=[label.pk]))
-        self.assertTrue(response.context["object_list"])
+        self.assertEqual([favorites], list(response.context["object_list"]))
         # our child label
         self.assertContains(response, "child")
 
@@ -5612,6 +5659,11 @@ class FlowLabelTest(TembaTest):
 
         response = self.client.get(reverse("flows.flow_filter", args=[label.pk]))
         self.assertFalse(response.context["object_list"])
+
+        # try to view our cat label in our other org
+        cat = FlowLabel.create(self.org2, "cat")
+        response = self.client.get(reverse("flows.flow_filter", args=[cat.pk]))
+        self.assertLoginRedirect(response)
 
     def test_toggle_label(self):
         label = FlowLabel.create(self.org, "toggle me")

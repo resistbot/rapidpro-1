@@ -128,8 +128,8 @@ class ContactGroupForm(forms.ModelForm):
 
         try:
             parsed = parse_query(self.org.id, self.cleaned_data["query"])
-            if "id" in parsed.fields:
-                raise forms.ValidationError(_('You cannot create a dynamic group based on "id".'))
+            if not parsed.allow_as_group:
+                raise forms.ValidationError(_('You cannot create a dynamic group based on "id" or "group".'))
 
             if (
                 self.instance
@@ -264,7 +264,7 @@ class ContactListView(OrgPermsMixin, SmartListView):
             try:
                 results = search_contacts(org.id, str(group.uuid), search_query, sort_on, offset)
                 self.parsed_query = results.query if len(results.query) > 0 else None
-                self.save_dynamic_search = "id" not in results.fields
+                self.save_dynamic_search = results.allow_as_group
 
                 return IDSliceQuerySet(Contact, results.contact_ids, offset, results.total)
             except SearchException as e:
@@ -274,7 +274,11 @@ class ContactListView(OrgPermsMixin, SmartListView):
                 return Contact.objects.none()
         else:
             # if user search is not defined, use DB to select contacts
-            qs = group.contacts.all().order_by("-id").prefetch_related("org", "all_groups")
+            qs = (
+                group.contacts.filter(org=self.request.user.get_org())
+                .order_by("-id")
+                .prefetch_related("org", "all_groups")
+            )
             patch_queryset_count(qs, group.get_member_count)
             return qs
 
@@ -1340,7 +1344,7 @@ class ContactCRUDL(SmartCRUDL):
             context["reply_disabled"] = True
             return context
 
-    class Filter(ContactActionMixin, ContactListView):
+    class Filter(ContactActionMixin, ContactListView, OrgObjPermsMixin):
         template_name = "contacts/contact_filter.haml"
 
         def get_gear_links(self):
@@ -1384,8 +1388,11 @@ class ContactCRUDL(SmartCRUDL):
         def derive_url_pattern(cls, path, action):
             return r"^%s/%s/(?P<group>[^/]+)/$" % (path, action)
 
+        def get_object_org(self):
+            return ContactGroup.user_groups.get(uuid=self.kwargs["group"]).org
+
         def derive_group(self):
-            return ContactGroup.user_groups.get(uuid=self.kwargs["group"])
+            return ContactGroup.user_groups.get(uuid=self.kwargs["group"], org=self.request.user.get_org())
 
     class Create(ModalMixin, OrgPermsMixin, SmartCreateView):
         form_class = ContactForm
@@ -1567,7 +1574,7 @@ class ContactCRUDL(SmartCRUDL):
                     context["value"] = self.get_object().get_field_display(contact_field)
             return context
 
-    class Block(OrgPermsMixin, SmartUpdateView):
+    class Block(OrgObjPermsMixin, SmartUpdateView):
         """
         Block this contact
         """
@@ -1580,7 +1587,7 @@ class ContactCRUDL(SmartCRUDL):
             obj.block(self.request.user)
             return obj
 
-    class Unblock(OrgPermsMixin, SmartUpdateView):
+    class Unblock(OrgObjPermsMixin, SmartUpdateView):
         """
         Unblock this contact
         """
@@ -1593,7 +1600,7 @@ class ContactCRUDL(SmartCRUDL):
             obj.unblock(self.request.user)
             return obj
 
-    class Unstop(OrgPermsMixin, SmartUpdateView):
+    class Unstop(OrgObjPermsMixin, SmartUpdateView):
         """
         Unstops this contact
         """
@@ -1606,7 +1613,7 @@ class ContactCRUDL(SmartCRUDL):
             obj.unstop(self.request.user)
             return obj
 
-    class Delete(OrgPermsMixin, SmartUpdateView):
+    class Delete(OrgObjPermsMixin, SmartUpdateView):
         """
         Delete this contact (can't be undone)
         """
@@ -1881,7 +1888,7 @@ class ContactFieldCRUDL(SmartCRUDL):
             response["Temba-Success"] = self.get_success_url()
             return response
 
-    class Update(ModalMixin, OrgPermsMixin, SmartUpdateView):
+    class Update(ModalMixin, OrgObjPermsMixin, SmartUpdateView):
         queryset = ContactField.user_fields
         form_class = UpdateContactFieldForm
         success_message = ""
@@ -1912,7 +1919,7 @@ class ContactFieldCRUDL(SmartCRUDL):
             response["Temba-Success"] = self.get_success_url()
             return response
 
-    class Delete(OrgPermsMixin, SmartUpdateView):
+    class Delete(OrgObjPermsMixin, SmartUpdateView):
         queryset = ContactField.user_fields
         success_url = "@contacts.contactfield_list"
         success_message = ""
@@ -1960,7 +1967,9 @@ class ContactFieldCRUDL(SmartCRUDL):
 
                 with transaction.atomic():
                     for cfid, priority in post_data.items():
-                        ContactField.user_fields.filter(id=cfid).update(priority=priority)
+                        ContactField.user_fields.filter(id=cfid, org=self.request.user.get_org()).update(
+                            priority=priority
+                        )
 
                 return HttpResponse('{"status":"OK"}', status=200, content_type="application/json")
 

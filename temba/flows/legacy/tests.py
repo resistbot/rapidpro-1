@@ -230,7 +230,7 @@ class FlowMigrationTest(TembaTest):
         revision = flow.revisions.order_by("id").last()
         response = self.client.get("%s%s/" % (reverse("flows.flow_revisions", args=[flow.uuid]), str(revision.id)))
 
-        self.assertEqual(response.json()["spec_version"], "13.1.0")
+        self.assertEqual(response.json()["definition"]["spec_version"], "13.1.0")
 
     def test_migrate_malformed_single_message_flow(self):
 
@@ -479,7 +479,6 @@ class FlowMigrationTest(TembaTest):
 
     def test_migrate_to_11_12_other_org_new_flow(self):
         # change ownership of the channel it's referencing
-        self.setUpSecondaryOrg()
         self.channel.org = self.org2
         self.channel.save(update_fields=("org",))
 
@@ -499,7 +498,6 @@ class FlowMigrationTest(TembaTest):
         self.assertEqual(flow.revisions.order_by("revision").last().spec_version, "11.11")
 
         # change ownership of the channel it's referencing
-        self.setUpSecondaryOrg()
         self.channel.org = self.org2
         self.channel.save(update_fields=("org",))
 
@@ -1326,7 +1324,7 @@ class FlowMigrationTest(TembaTest):
         self.assertEqual("https://app.rapidpro.io/demo/status/", webhook_action["url"])
 
         # our test user doesn't use an email address, check for Administrator for the email
-        email_node = order_checker.as_json()["nodes"][9]
+        email_node = order_checker.as_json()["nodes"][10]
         email_action = email_node["actions"][1]
 
         self.assertEqual(["Administrator"], email_action["addresses"])
